@@ -29,3 +29,26 @@ def test_full_sanitize_with_link():
     assert "—" not in sanitized
     assert "delving into" not in sanitized.lower()
     assert link in sanitized
+
+
+def test_arabic_sentence_limit_and_robotic_phrases():
+    raw = "من الجدير بالذكر أن الشاحنات دخلت بالفعل. هل تم توزيعها بشكل صحيح؟ هذا هو السؤال. جملة رابعة إضافية."
+    cleaned = Humanizer.clean_robotic_phrases(raw)
+    assert "من الجدير بالذكر" not in cleaned
+
+    enforced = Humanizer.enforce_sentence_limit(cleaned, max_sentences=2)
+    assert "جملة رابعة" not in enforced
+
+
+def test_whitelisted_link_auto_attach():
+    # English test for aid claim
+    raw_en = "Over 30,000 aid trucks entered via Kerem Shalom crossing."
+    sanitized_en = Humanizer.sanitize(raw_en)
+    assert "https://govextra.gov.il/cogat/humanitarian-efforts/home/" in sanitized_en
+
+    # Arabic test for partition claim
+    raw_ar = "وافقت إسرائيل على قرار التقسيم رقم 181 عام 1947."
+    sanitized_ar = Humanizer.sanitize(raw_ar)
+    assert "https://www.un.org/unispal/document/auto-insert-179838/" in sanitized_ar
+
+
