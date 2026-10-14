@@ -19,9 +19,9 @@
 | :--- | :--- | :--- | :--- |
 | **Step 1** | **Gemini API & Free-Tier Connectivity** | **COMPLETED** | `.env`, `config/settings.py`, `engine/grounding.py` |
 | **Step 2** | **Google Search Grounding & Web Fact Citations** | **COMPLETED** | `engine/grounding.py` |
-| **Step 3** | **Advocacy Persona & System Prompt Tuning** | **NEXT** | `engine/grounding.py` |
-| **Step 4** | **Verified Fact & Whitelisted Links Vault** | PENDING | `assets/proofs/whitelisted_sources.json`, `engine/humanizer.py` |
-| **Step 5** | **Virality Threshold & Keyword Calibration** | PENDING | `config/settings.py`, `engine/virality.py` |
+| **Step 3** | **Advocacy Persona & System Prompt Tuning** | **COMPLETED** | `engine/grounding.py`, `engine/humanizer.py` |
+| **Step 4** | **Verified Fact & Whitelisted Links Vault** | **COMPLETED** | `assets/proofs/whitelisted_sources.json`, `engine/humanizer.py` |
+| **Step 5** | **Virality Threshold & Keyword Calibration** | **NEXT** | `config/settings.py`, `engine/virality.py` |
 | **Step 6** | **Multi-Turn Thread State & Anti-Troll Rules** | PENDING | `engine/thread_state.py` |
 | **Step 7** | **Interactive Human-in-the-Loop Mode** | PENDING | `main.py` |
 | **Step 8** | **Live Twitter / X Integration (Zernio/Direct)** | PENDING | `.env`, `providers/zernio_provider.py` |
@@ -37,31 +37,22 @@
 
 ---
 
-### Step 2: Google Search Grounding & Web Citations (Current Step)
+### Step 2: Google Search Grounding & Web Citations (Completed)
 * **Goal**: Equip `GroundingEngine` with Google Search tool support (`tools=[types.Tool(google_search=types.GoogleSearch())]`) to verify live claims against real-time news, UN records, and government releases.
-* **Files**: [`engine/grounding.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/grounding.py)
-* **Deliverables**:
-  1. Add Google Search tool parameter to `types.GenerateContentConfig`.
-  2. Parse search grounding chunks and metadata to automatically fill `recommended_link`.
-  3. Add retry mechanism for temporary Google API spikes (503/429).
-* **Verification Command**:
-  ```powershell
-  python -c "from config.settings import get_settings; from engine.grounding import GroundingEngine; s=get_settings(); g=GroundingEngine(api_key=s.gemini_api_key, model_name=s.gemini_model); res=g.evaluate_and_draft('Israel blocked all aid trucks today.', 'user_1'); print('SEARCH SOURCES:', res.recommended_link)"
-  ```
+* **Result**: Implemented with exponential backoff and automatic citation extraction.
 
 ---
 
-### Step 3: Advocacy Persona & System Prompt Tuning
-* **Goal**: Refine prompt voice: "The adult in the room" (rational, composed, authoritative, subtle dry wit). Strict ban on robotic clichés, em-dashes, and emotional fights. Dynamic language matching.
-* **Files**: [`engine/grounding.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/grounding.py)
-* **Verification Command**: Benchmark response generation against 3 multilingual test claims (English, Hebrew, French).
+### Step 3: Advocacy Persona & System Prompt Tuning (Completed)
+* **Goal**: Refine prompt voice: "The adult in the room" (rational, composed, authoritative, subtle dry wit). Strict ban on robotic clichés, em-dashes.
+* **Language Policy**: Restrict generated replies strictly to **English** and **Arabic** only (Arabic inputs $\to$ natural Arabic; English or other language inputs $\to$ natural English).
+* **Result**: Tested against Arabic, English, and non-target languages. 10/10 unit tests passing.
 
 ---
 
-### Step 4: Verified Proof & Whitelisted Links Vault
+### Step 4: Verified Proof & Whitelisted Links Vault (Completed)
 * **Goal**: Build a local verified source registry (`whitelisted_sources.json`) containing official primary-source URLs (COGAT aid dashboards, 1947 UN Resolution 181, LOAC legal documents).
-* **Files**: `assets/proofs/whitelisted_sources.json`, [`engine/humanizer.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/humanizer.py)
-* **Verification Command**: `pytest tests/test_humanizer.py`
+* **Result**: Created JSON registry mapping topics & bilingual keywords. Wired into `Humanizer.sanitize()` to auto-attach primary sources in English and Arabic. 11/11 unit tests passing.
 
 ---
 
