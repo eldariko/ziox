@@ -1,0 +1,80 @@
+{
+  "aid_and_food": {
+    "topic": "Humanitarian Aid & Crossing Logistics",
+    "keywords": [
+      "aid",
+      "food",
+      "truck",
+      "hunger",
+      "starvation",
+      "cogat",
+      "kerem shalom",
+      "مساعدات",
+      "شاحنات",
+      "تجويع",
+      "غذاء",
+      "كرم أبو سالم"
+    ],
+    "sources": {
+      "en": "https://govextra.gov.il/cogat/humanitarian-efforts/home/",
+      "ar": "https://govextra.gov.il/cogat/humanitarian-efforts/home/"
+    },
+    "description": "Official Israeli COGAT daily humanitarian dashboard and crossing manifests."
+  },
+  "partition_and_statehood": {
+    "topic": "UN Resolution 181 & Historical Peace Proposals",
+    "keywords": [
+      "partition",
+      "1947",
+      "two state",
+      "camp david",
+      "181",
+      "olmert",
+      "peace",
+      "تقسيم",
+      "حل الدولتين",
+      "كامب ديفيد",
+      "سلام"
+    ],
+    "sources": {
+      "en": "https://www.un.org/unispal/document/auto-insert-179838/",
+      "ar": "https://www.un.org/unispal/document/auto-insert-179838/"
+    },
+    "description": "United Nations General Assembly Resolution 181 (II) official UNISPAL archival record."
+  },
+  "law_of_armed_conflict": {
+    "topic": "Law of Armed Conflict & Military Necessity",
+    "keywords": [
+      "loac",
+      "war crime",
+      "genocide",
+      "civilian casualty",
+      "human shield",
+      "جرائم حرب",
+      "دروع بشرية",
+      "قانون دولي"
+    ],
+    "sources": {
+      "en": "https://www.idf.il/en/mini-sites/military-advocate-general-s-corps/",
+      "ar": "https://www.idf.il/en/mini-sites/military-advocate-general-s-corps/"
+    },
+    "description": "Military Advocate General's Corps international legal framework."
+  },
+  "hostages": {
+    "topic": "Hostages & Oct 7 Civilian Abductions",
+    "keywords": [
+      "hostage",
+      "abductee",
+      "kidnapped",
+      "october 7",
+      "رهائن",
+      "مختطفين",
+      "٧ أكتوبر"
+    ],
+    "sources": {
+      "en": "https://www.gov.il/en/departments/news/swords-of-iron-hostages-and-missing",
+      "ar": "https://www.gov.il/en/departments/news/swords-of-iron-hostages-and-missing"
+    },
+    "description": "Official government database of verified hostages and missing persons."
+  }
+}
