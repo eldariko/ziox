@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     # API Keys & Models
     gemini_api_key: str = Field(default="", description="Google Gemini API Key")
-    gemini_model: str = Field(default="gemini-2.5-flash", description="Gemini Model Name")
+    gemini_model: str = Field(default="gemini-3.5-flash-lite", description="Gemini Model Name")
     zernio_api_key: str = Field(default="", description="Zernio API Key")
     zernio_twitter_account_id: str = Field(default="", description="Zernio connected X Account ID")
 
