@@ -1,15 +1,31 @@
 # zioX: Step-by-Step Collaborative Implementation Plan
 
 > **Note**: This file serves as the single source of truth for our build roadmap.
-> Every step is granular, specifies the exact files touched, and requires your explicit approval before code is committed.
+> Every step follows AI-assisted engineering design principles: explicit requirements, architecture design, verifiable test criteria, and user approval gates before code execution.
 
 ---
 
-## Workflow Agreement
-1. **One Step at a Time**: We work strictly sequentially.
-2. **Review Before Writing**: I present the plan, diff preview, and touched files first. You approve before any code is modified.
-3. **Dry-Run by Default**: Safe simulation mode (`DRY_RUN=true`) remains active until you choose live deployment.
-4. **Verifiable**: Each step includes a 30-second verification command.
+## AI-Assisted Design & Engineering Protocol (Mandatory Workflow)
+
+To guarantee that everything requested is properly designed, implemented, and verified without regressions, every upcoming step will follow this strict lifecycle:
+
+```mermaid
+flowchart LR
+    StepPlan["1. Detailed Step Plan\n(docs/plans/step_X.md)"] --> UserReview["2. User Review\n& Approval Gate"]
+    UserReview --> TDD["3. Test-Driven Build\n& Unit Tests"]
+    TDD --> Verification["4. Automated Verification\n(Pytest + Live Smoke)"]
+    Verification --> MasterUpdate["5. Master Roadmap\nCheck-off"]
+```
+
+1. **Dedicated Step Plan Document**:
+   - For every step, a dedicated design and verification file will be created in `docs/plans/step_XX_<name>.md`.
+   - The plan details: Architecture changes, exact file diffs, edge cases, human-in-the-loop UX, anti-ban protections, and verification commands.
+2. **Review & Approval Gate**:
+   - No code is committed until you inspect and approve the step design.
+3. **Safe Simulation by Default**:
+   - All tests and executions default to `DRY_RUN=True` to safeguard accounts and API quota.
+4. **Verifiable Proof of Delivery**:
+   - Every completed step must pass automated pytest suites and a 30-second live verification command before moving forward.
 
 ---
 
@@ -26,7 +42,9 @@
 | **Step 7** | **Interactive Human-in-the-Loop Mode** | **COMPLETED** | `main.py`, `engine/orchestrator.py` |
 | **Step 8A** | **Decoupled Discovery Radar & Tweet Queue** | **COMPLETED** | `engine/radar.py`, `database/schema.py`, `database/repository.py`, `main.py` |
 | **Step 8B** | **Targeted Action & Reply Dispatcher** | **COMPLETED** | `engine/orchestrator.py`, `providers/twikit_provider.py`, `main.py` |
-| **Step 9** | **Autonomous Scheduler & Safety Pacing** | **NEXT** | `scheduler.py` |
+| **Step 8C** | **Verified Link Validator & Live Citation Engine** | **COMPLETED** | `docs/plans/step_08c_link_validator.md`, `engine/link_validator.py`, `engine/humanizer.py`, `assets/proofs/whitelisted_sources.json` |
+| **Step 9** | **Anti-Ban Stealth Pacing & Rate Limiting** | **READY FOR REVIEW** | `docs/plans/step_09_stealth_pacing.md`, `config/settings.py`, `engine/orchestrator.py` |
+| **Step 10** | **Autonomous Scheduler & Safety Ceiling** | **PENDING** | `docs/plans/step_10_scheduler.md`, `scheduler.py` |
 
 ---
 
@@ -39,63 +57,72 @@
 ---
 
 ### Step 2: Google Search Grounding & Web Citations (Completed)
-* **Goal**: Equip `GroundingEngine` with Google Search tool support (`tools=[types.Tool(google_search=types.GoogleSearch())]`) to verify live claims against real-time news, UN records, and government releases.
+* **Goal**: Equip `GroundingEngine` with Google Search tool support to verify live claims against real-time news, UN records, and government releases.
 * **Result**: Implemented with exponential backoff and automatic citation extraction.
 
 ---
 
 ### Step 3: Advocacy Persona & System Prompt Tuning (Completed)
 * **Goal**: Refine prompt voice: "The adult in the room" (rational, composed, authoritative, subtle dry wit). Strict ban on robotic clichés, em-dashes.
-* **Language Policy**: Restrict generated replies strictly to **English** and **Arabic** only (Arabic inputs $\to$ natural Arabic; English or other language inputs $\to$ natural English).
+* **Language Policy**: Restrict generated replies strictly to **English** and **Arabic** only.
 * **Result**: Tested against Arabic, English, and non-target languages. 10/10 unit tests passing.
 
 ---
 
 ### Step 4: Verified Proof & Whitelisted Links Vault (Completed)
-* **Goal**: Build a local verified source registry (`whitelisted_sources.json`) containing official primary-source URLs (COGAT aid dashboards, 1947 UN Resolution 181, LOAC legal documents).
-* **Result**: Created JSON registry mapping topics & bilingual keywords. Wired into `Humanizer.sanitize()` to auto-attach primary sources in English and Arabic. 11/11 unit tests passing.
+* **Goal**: Build local verified source registry (`whitelisted_sources.json`) containing official primary-source URLs.
+* **Result**: Created JSON registry mapping topics & bilingual keywords. Wired into `Humanizer.sanitize()`. 11/11 unit tests passing.
 
 ---
 
 ### Step 5: Virality Threshold & Keyword Calibration (Completed)
-* **Goal**: Calibrate search keywords (`Israel`, `Gaza aid`, `IDF`, `Zionism`, `إسرائيل`, `غزة`, `مساعدات غزة`) and fine-tune velocity momentum scoring.
-* **Result**: Implemented virality tier classifier (`VIRAL_EXPLOSIVE`, `VIRAL_HIGH`, `VIRAL_EMERGING`). Updated orchestrator to sort and prioritize candidate posts by momentum. 12/12 unit tests passing.
+* **Goal**: Calibrate search keywords and fine-tune velocity momentum scoring.
+* **Result**: Implemented virality tier classifier (`VIRAL_EXPLOSIVE`, `VIRAL_HIGH`, `VIRAL_EMERGING`). Updated orchestrator to sort candidate posts by momentum. 12/12 unit tests passing.
 
 ---
 
 ### Step 6: Multi-Turn Conversation & Disengagement Tuning (Completed)
-* **Goal**: Validate thread state progression: Turn 1 (Factual rebuttal) $\to$ Turn 2 (Follow-up evidence) $\to$ Turn 3 (Auto-disengage). Instant termination upon detecting abusive or bad-faith trolling.
-* **Result**: Added comprehensive bilingual (English & Arabic) slur and troll filter patterns. Enforced automatic thread disengagement (`DROPPED_TOXIC`, `COMPLETED`). 13/13 unit tests passing.
+* **Goal**: Validate thread state progression: Turn 1 (Factual rebuttal) $\to$ Turn 2 (Follow-up evidence) $\to$ Turn 3 (Auto-disengage). Instant termination upon detecting abusive trolling.
+* **Result**: Added bilingual slur/troll filters. Enforced automatic thread disengagement (`DROPPED_TOXIC`, `COMPLETED`). 13/13 unit tests passing.
 
 ---
 
 ### Step 7: Interactive Human-in-the-Loop Mode (Completed)
 * **Goal**: Add CLI flag `--interactive` that displays proposed replies for review: `[A]pprove & Send / [E]dit Draft / [S]kip Tweet / [Q]uit Cycle`.
-* **Result**: Implemented terminal prompt with full context (claim, virality tier, facts, reply). Added text editing, skipping, and graceful exit. 14/14 unit tests passing.
+* **Result**: Implemented terminal prompt with full context. Added length checking (280-char limit) and editing. 14/14 unit tests passing.
 
 ---
 
 ### Step 8A: Decoupled Discovery Radar & Tweet Queue (Completed)
-* **Goal**: Implement the Discovery Radar tool (`engine/radar.py`) that discovers candidate viral tweets across target keywords (or via manual URL/ID ingestion) and queues them into SQLite with `status='DISCOVERED'`.
-* **Result**:
-  - Enhanced SQLite schema and repository with status lifecycle (`DISCOVERED`, `APPROVED`, `PUBLISHED`, `SKIPPED`) and automatic migration.
-  - Implemented `DiscoveryRadar` with regex-based URL parsing, virality calculation, and deduplication.
-  - Added CLI options `--queue-tweet`, `--queue-list`, and `--radar`.
-  - Comprehensive unit test suite: 17/17 passing tests (`tests/test_radar.py`).
+* **Goal**: Implement Discovery Radar tool (`engine/radar.py`) that discovers candidate viral tweets across target keywords and queues them into SQLite with `status='DISCOVERED'`.
+* **Result**: Schema migration, regex URL parser, virality calculation, CLI flags (`--radar`, `--queue-tweet`, `--queue-list`). 17/17 passing tests.
 
 ---
 
 ### Step 8B: Targeted Action & Reply Dispatcher (Completed)
-* **Goal**: Implement the Targeted Action/Responder tool that pulls `DISCOVERED` tweets from the queue, evaluates thread state, runs Gemini Google Search grounding, humanizes the response, and posts the reply via an authenticated session.
-* **Result**:
-  - Implemented `TwikitTwitterProvider` in [`providers/twikit_provider.py`](file:///C:/Users/User/PycharmProjects/zioX/providers/twikit_provider.py) supporting direct session cookie authentication (`auth_token`, `ct0`, `cookies.json`), overcoming third-party API reply limitations.
-  - Added `process_queue()` to [`engine/orchestrator.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/orchestrator.py) supporting batch queue processing and targeted single tweet execution (`target_tweet_id`).
-  - Added CLI commands `--process-queue` and `--process-tweet <url_or_id>`.
-  - Comprehensive unit test suite: 20/20 passing tests (`tests/test_responder.py`). Tested live queue processing against real Gemini API with automatic rate-limit backoff.
+* **Goal**: Implement Targeted Action/Responder tool that pulls `DISCOVERED` tweets from the queue, evaluates thread state, runs Gemini grounding, humanizes response, and posts via authenticated session.
+* **Result**: `TwikitTwitterProvider` with session cookies, `process_queue()` batch/single tweet dispatcher, strict Twitter 280-char enforcement. 23/23 passing tests.
 
 ---
 
-### Step 9: Autonomous Scheduler & Safety Pacing (Next)
-* **Goal**: Set up scheduled runs (every 2–3 hours) with monthly safety ceilings (20–30 replies/month) and comprehensive audit logging.
+### Step 8C: Verified Link Validator & Live Citation Engine (Completed)
+* **Goal**: Solve dead, 404, or 403 links. Establish a Link Validator that checks HTTP health of URLs before attaching them to replies. If a link fails or returns an error, cleanly fallback to verified primary sources or post grounded text without a broken link.
+* **Result**:
+  - Created [`engine/link_validator.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/link_validator.py) with dual HEAD/GET verification, browser User-Agent headers, and in-memory cache.
+  - Audited and updated [`assets/proofs/whitelisted_sources.json`](file:///C:/Users/User/PycharmProjects/zioX/assets/proofs/whitelisted_sources.json), replacing 403-restricted endpoints with verified live IDF databases.
+  - Updated [`engine/humanizer.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/humanizer.py) with `resolve_valid_link()` to ensure no dead or 404 links are ever attached.
+  - Comprehensive unit test suite: 6/6 dedicated tests in [`tests/test_link_validator.py`](file:///C:/Users/User/PycharmProjects/zioX/tests/test_link_validator.py). Full suite: 29/29 tests passing.
+
+---
+
+### Step 9: Anti-Ban Stealth Pacing & Rate Limiting (Ready for Review)
+* **Goal**: Protect accounts from X's anti-bot detection during automated batch runs by introducing randomized human Gaussian typing delays (35–85s), per-cycle burst caps (max 2–3 replies/cycle), and link frequency throttling.
+* **Plan File**: [`docs/plans/step_09_stealth_pacing.md`](file:///C:/Users/User/PycharmProjects/zioX/docs/plans/step_09_stealth_pacing.md)
+* **Files**: `config/settings.py`, `engine/orchestrator.py`, `tests/test_stealth.py`
+
+---
+
+### Step 10: Autonomous Scheduler & Safety Ceiling (Pending)
+* **Goal**: Continuous autonomous scheduling daemon with monthly quota hard-stops and execution auditing.
+* **Plan File**: `docs/plans/step_10_scheduler.md`
 * **Files**: `scheduler.py`
-* **Verification Command**: Trigger single scheduler cycle and verify database logs.
