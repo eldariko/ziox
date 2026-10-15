@@ -45,12 +45,14 @@ zioX/
 ├── providers/
 │   ├── base.py                  # Abstract Twitter Provider interface & Tweet model
 │   ├── mock_provider.py         # Mock provider for safe offline testing
-│   └── zernio_provider.py       # Live Zernio REST API integration
+│   ├── zernio_provider.py       # Zernio REST API integration
+│   └── twikit_provider.py       # Direct X session automation provider (Twikit)
 ├── engine/
 │   ├── virality.py              # Virality momentum scoring
 │   ├── thread_state.py          # State machine & toxicity guard
 │   ├── grounding.py             # Gemini reasoning & fact-checking
 │   ├── humanizer.py             # Anti-bot sanitation pipeline
+│   ├── radar.py                 # Discovery Radar & queue ingestion
 │   └── orchestrator.py          # Unified execution pipeline
 ├── tests/                       # Unit test suite
 └── main.py                      # CLI entry point
@@ -73,21 +75,46 @@ Copy-Item .env.example .env
 ```
 Fill in your credentials:
 - `GEMINI_API_KEY`: Google AI Studio API Key.
-- `TWITTER_PROVIDER`: `mock` (for testing) or `zernio` (for live deployment).
-- `ZERNIO_API_KEY` & `ZERNIO_TWITTER_ACCOUNT_ID` (if using Zernio).
+- `TWITTER_PROVIDER`: `mock` (offline testing), `twikit` (direct session cookies for third-party replies), or `zernio`.
+- **For Twikit Session Automation**:
+  - `X_AUTH_TOKEN`: Your `auth_token` cookie from x.com.
+  - `X_CT0`: Your `ct0` CSRF cookie from x.com.
+  - `X_COOKIES_FILE`: Optional path to saved `cookies.json`.
+- **For Zernio API**:
+  - `ZERNIO_API_KEY` & `ZERNIO_TWITTER_ACCOUNT_ID`.
 
 ### 3. Running zioX
-Run a dry-run test scan:
-```powershell
-python main.py --run-once
-```
 
-Check system status and logs:
-```powershell
-python main.py --status
-```
+#### A. Discovery Radar (Finding & Queuing Tweets)
+- Scan keywords and populate the SQLite queue:
+  ```powershell
+  python main.py --radar
+  ```
+- Manually queue a specific tweet URL or numeric ID:
+  ```powershell
+  python main.py --queue-tweet "https://x.com/user/status/1845123456789" --text "Claim text" --author "user" --likes 1200 --retweets 450
+  ```
+- Inspect currently queued candidate tweets:
+  ```powershell
+  python main.py --queue-list
+  ```
 
-Run tests:
-```powershell
-pytest
-```
+#### B. Fact-Checking & Targeted Action (Responder)
+- Process pending tweets in the queue with interactive Human-in-the-Loop review:
+  ```powershell
+  python main.py --process-queue -i
+  ```
+- Target and process a specific tweet URL or ID end-to-end:
+  ```powershell
+  python main.py --process-tweet "1845123456789" -i
+  ```
+
+#### C. Diagnostics & Testing
+- Display operational status, quotas, and database logs:
+  ```powershell
+  python main.py --status
+  ```
+- Run unit test suite:
+  ```powershell
+  pytest -v
+  ```

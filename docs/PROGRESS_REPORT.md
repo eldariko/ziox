@@ -26,19 +26,20 @@
 | **Settings & Config** | `config/settings.py` | Pydantic-based configuration reading from `.env` (API keys, thresholds, quotas). |
 | **Database Schema** | `database/schema.py` | SQLite schema defining `threads`, `processed_tweets`, and `bot_logs`. |
 | **Database Repository** | `database/repository.py` | Query layer for tweet deduplication, thread turn progression, and run audit logs. |
-| **Twitter Providers** | `providers/base.py`<br>`providers/mock_provider.py`<br>`providers/zernio_provider.py` | Abstract interface + offline mock provider + live Zernio REST client. |
-| **Virality Momentum** | `engine/virality.py` | Implements the PRD formula: $S = \frac{\text{Likes} + 2\cdot\text{RT} + 1.5\cdot\text{Replies}}{\text{Age in Minutes} + 10}$. |
+| **Twitter Providers** | `providers/base.py`<br>`providers/mock_provider.py`<br>`providers/zernio_provider.py`<br>`providers/twikit_provider.py` | Abstract interface + offline mock provider + Zernio API client + Twikit direct session cookie automation. |
+| **Virality Momentum** | `engine/virality.py` | Implements the PRD formula: $S = \frac{\text{Likes} + 2\cdot\text{RT} + 1.5\cdot\text{Replies}}{\text{Age in Minutes} + 10}$ with priority tiers. |
 | **Thread Manager** | `engine/thread_state.py` | Manages conversation turns (Turn 1, Turn 2) and instant disengagement upon detecting abusive language or trolling. |
-| **Grounding Engine** | `engine/grounding.py` | Google Gemini 2.0 / 1.5 reasoning pipeline with fallback mock fact-checking and structured JSON output. |
-| **Humanizer** | `engine/humanizer.py` | Anti-bot filter stripping em-dashes (`—`), removing robotic clichés, enforcing a 3-sentence ceiling, and attaching evidence links. |
-| **Orchestrator** | `engine/orchestrator.py` | Full pipeline uniting ingestion, deduplication, virality filtering, fact grounding, humanizing, and execution. |
-| **CLI & Status** | `main.py` | Interactive CLI with `--status`, `--run-once`, `--live`, and provider switching. |
-| **Proof Assets Store** | `assets/proofs/README.md` | Dedicated vault for verified reports, documents, and infographics. |
+| **Grounding Engine** | `engine/grounding.py` | Google Gemini 2.5 Flash Lite reasoning pipeline with Google Search grounding tool and exponential backoff retry shield. |
+| **Humanizer** | `engine/humanizer.py` | Anti-bot filter stripping em-dashes (`—`), removing robotic clichés, enforcing bilingual English/Arabic natural tones, and attaching verified whitelisted evidence links. |
+| **Discovery Radar** | `engine/radar.py` | Decoupled candidate discovery engine that scans keywords, calculates virality momentum, and populates SQLite queue. |
+| **Orchestrator** | `engine/orchestrator.py` | Full pipeline uniting ingestion, deduplication, virality filtering, fact grounding, humanizing, and execution (batch + queue processing). |
+| **CLI & Status** | `main.py` | Interactive CLI with `--status`, `--interactive`, `--radar`, `--queue-tweet`, `--queue-list`, `--process-queue`, and `--process-tweet`. |
+| **Proof Assets Store** | `assets/proofs/whitelisted_sources.json` | Dedicated vault for verified primary-source reports, COGAT dashboards, and legal resolutions. |
 
 ### D. Verification & Testing
-- Initialized Python 3.14 virtual environment with dependencies (`google-genai`, `pydantic`, `httpx`, `pytest`).
-- Built a unit test suite (`tests/`) with **9 passing tests** (virality scoring, humanizer, thread turns, toxicity disengagement, SQLite storage).
-- Executed end-to-end dry-run (`python main.py --run-once`), validating that tweets are evaluated, claims extracted, replies synthesized, and run metrics recorded.
+- Virtual environment with dependencies (`google-genai`, `pydantic-settings`, `httpx`, `twikit`, `pytest`).
+- Built an extensive unit test suite (`tests/`) with **20 passing tests** across all modules.
+- Validated decoupled two-tool architecture: Discovery Radar enqueuing into SQLite and Targeted Action Responder dispatching fact-checked rebuttals with live Google Gemini search grounding.
 
 ---
 

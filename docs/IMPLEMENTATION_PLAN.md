@@ -25,8 +25,8 @@
 | **Step 6** | **Multi-Turn Thread State & Anti-Troll Rules** | **COMPLETED** | `engine/thread_state.py` |
 | **Step 7** | **Interactive Human-in-the-Loop Mode** | **COMPLETED** | `main.py`, `engine/orchestrator.py` |
 | **Step 8A** | **Decoupled Discovery Radar & Tweet Queue** | **COMPLETED** | `engine/radar.py`, `database/schema.py`, `database/repository.py`, `main.py` |
-| **Step 8B** | **Targeted Action & Reply Dispatcher** | **NEXT** | `engine/orchestrator.py`, `providers/direct_provider.py`, `main.py` |
-| **Step 9** | **Autonomous Scheduler & Safety Pacing** | PENDING | `scheduler.py` |
+| **Step 8B** | **Targeted Action & Reply Dispatcher** | **COMPLETED** | `engine/orchestrator.py`, `providers/twikit_provider.py`, `main.py` |
+| **Step 9** | **Autonomous Scheduler & Safety Pacing** | **NEXT** | `scheduler.py` |
 
 ---
 
@@ -85,18 +85,17 @@
 
 ---
 
-### Step 8B: Targeted Action & Reply Dispatcher (Pending)
+### Step 8B: Targeted Action & Reply Dispatcher (Completed)
 * **Goal**: Implement the Targeted Action/Responder tool that pulls `DISCOVERED` tweets from the queue, evaluates thread state, runs Gemini Google Search grounding, humanizes the response, and posts the reply via an authenticated session.
-* **Key Components**:
-  - Responder module reading from SQLite queue or a specific target tweet ID.
-  - Interactive approval or automated dispatch with anti-bot pacing.
-  - Direct posting integration (Playwright browser session or authenticated connector).
-* **Files**: `engine/orchestrator.py`, `providers/direct_provider.py`, `main.py`
-* **Verification Command**: Process a queued tweet in dry-run mode and verify the full pipeline end-to-end.
+* **Result**:
+  - Implemented `TwikitTwitterProvider` in [`providers/twikit_provider.py`](file:///C:/Users/User/PycharmProjects/zioX/providers/twikit_provider.py) supporting direct session cookie authentication (`auth_token`, `ct0`, `cookies.json`), overcoming third-party API reply limitations.
+  - Added `process_queue()` to [`engine/orchestrator.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/orchestrator.py) supporting batch queue processing and targeted single tweet execution (`target_tweet_id`).
+  - Added CLI commands `--process-queue` and `--process-tweet <url_or_id>`.
+  - Comprehensive unit test suite: 20/20 passing tests (`tests/test_responder.py`). Tested live queue processing against real Gemini API with automatic rate-limit backoff.
 
 ---
 
-### Step 9: Autonomous Scheduler & Safety Pacing
+### Step 9: Autonomous Scheduler & Safety Pacing (Next)
 * **Goal**: Set up scheduled runs (every 2–3 hours) with monthly safety ceilings (20–30 replies/month) and comprehensive audit logging.
 * **Files**: `scheduler.py`
 * **Verification Command**: Trigger single scheduler cycle and verify database logs.
