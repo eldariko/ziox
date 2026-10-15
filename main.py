@@ -64,6 +64,11 @@ def main():
         choices=["mock", "zernio"],
         help="Override Twitter provider ('mock' or 'zernio')"
     )
+    parser.add_argument(
+        "-i", "--interactive",
+        action="store_true",
+        help="Enable Human-in-the-Loop review mode before any reply is sent"
+    )
 
     args = parser.parse_args()
     settings = get_settings()
@@ -105,9 +110,10 @@ def main():
         grounding_engine=grounding
     )
 
-    if args.run_once or len(sys.argv) == 1:
-        print(f"\n[zioX] Starting scan cycle (Provider: {settings.twitter_provider}, Dry Run: {settings.dry_run})...")
-        report = orchestrator.run_cycle()
+    if args.run_once or args.interactive or len(sys.argv) == 1:
+        mode_label = "Interactive" if args.interactive else "Standard"
+        print(f"\n[zioX] Starting scan cycle (Mode: {mode_label}, Provider: {settings.twitter_provider}, Dry Run: {settings.dry_run})...")
+        report = orchestrator.run_cycle(interactive=args.interactive)
         print(f"[zioX] Cycle completed with status: {report['status']}")
         print(f"       Tweets scanned: {report['scanned']}")
         print(f"       Replies planned/sent: {report['replies_sent']}")
