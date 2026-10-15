@@ -9,12 +9,31 @@ from providers.mock_provider import MockTwitterProvider
 from providers.zernio_provider import ZernioTwitterProvider
 from engine.grounding import GroundingEngine
 from engine.orchestrator import BotOrchestrator
+from engine.radar import DiscoveryRadar
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("zioX")
+
+
+def show_queue(repo: Repository) -> None:
+    """Print all candidate tweets currently waiting in the DISCOVERED queue."""
+    pending = repo.get_pending_tweets(limit=25)
+    print("\n" + "=" * 65)
+    print("               zioX CANDIDATE TWEET QUEUE")
+    print("=" * 65)
+    if not pending:
+        print("  Queue is empty (no DISCOVERED tweets awaiting action).")
+    else:
+        for idx, item in enumerate(pending, 1):
+            print(f" {idx}. Tweet ID: {item['tweet_id']} | @{item['author_handle']}")
+            print(f"    Virality Score: {item['virality_score']} | Created: {item['created_at']}")
+            snippet = item['tweet_text'][:90] + "..." if len(item['tweet_text']) > 90 else item['tweet_text']
+            print(f"    Text: \"{snippet}\"")
+            print("    " + "-" * 55)
+    print("=" * 65 + "\n")
 
 
 def show_status(repo: Repository, settings) -> None:
@@ -48,6 +67,51 @@ def main():
         "--status",
         action="store_true",
         help="Display bot status, database statistics, and recent execution logs"
+    )
+    parser.add_argument(
+        "--radar",
+        action="store_true",
+        help="Run Discovery Radar across all search keywords to find and queue candidate posts"
+    )
+    parser.add_argument(
+        "--queue-tweet",
+        type=str,
+        help="Queue a specific tweet by URL or numeric ID into the database queue"
+    )
+    parser.add_argument(
+        "--text",
+        type=str,
+        default="",
+        help="Tweet text (used when enqueuing via --queue-tweet)"
+    )
+    parser.add_argument(
+        "--author",
+        type=str,
+        default="unknown",
+        help="Tweet author handle (used when enqueuing via --queue-tweet)"
+    )
+    parser.add_argument(
+        "--likes",
+        type=int,
+        default=0,
+        help="Tweet likes count (used when enqueuing via --queue-tweet)"
+    )
+    parser.add_argument(
+        "--retweets",
+        type=int,
+        default=0,
+        help="Tweet retweets count (used when enqueuing via --queue-tweet)"
+    )
+    parser.add_argument(
+        "--replies",
+        type=int,
+        default=0,
+        help="Tweet replies count (used when enqueuing via --queue-tweet)"
+    )
+    parser.add_argument(
+        "--queue-list",
+        action="store_true",
+        help="Display all candidate tweets currently in the queue"
     )
     parser.add_argument(
         "--run-once",
@@ -85,6 +149,31 @@ def main():
         show_status(repo, settings)
         return
 
+    if args.queue_list:
+        show_queue(repo)
+        return
+
+    if args.queue_tweet:
+        radar = DiscoveryRadar(repo)
+        try:
+            res = radar.enqueue_manual(
+                url_or_id=args.queue_tweet,
+                author_handle=args.author,
+                tweet_text=args.text,
+                likes=args.likes,
+                retweets=args.retweets,
+                replies=args.replies
+            )
+            print("\n[zioX Radar] Tweet Enqueue Result:")
+            print(f"  Tweet ID       : {res['tweet_id']}")
+            print(f"  Author         : @{res['author']}")
+            print(f"  Virality Score : {res['virality_score']} [{res['tier']}]")
+            print(f"  Queue Status   : {res['status']} (Newly Enqueued: {res['newly_enqueued']})\n")
+        except Exception as e:
+            logger.error(f"Failed to enqueue tweet: {e}")
+            sys.exit(1)
+        return
+
     # Choose Twitter provider
     if settings.twitter_provider == "zernio":
         if not settings.zernio_api_key:
@@ -96,6 +185,21 @@ def main():
         )
     else:
         provider = MockTwitterProvider()
+
+    if args.radar:
+        radar = DiscoveryRadar(repo)
+        print(f"\n[zioX Radar] Scanning {len(settings.search_keywords)} target keywords (Provider: {settings.twitter_provider})...")
+        discovered = radar.scan_keywords(
+            provider=provider,
+            keywords=settings.search_keywords,
+            limit_per_keyword=5,
+            min_virality_score=settings.virality_threshold
+        )
+        print(f"[zioX Radar] Scan complete. Enqueued {len(discovered)} candidate tweets into database.")
+        for item in discovered:
+            print(f"  * [{item['tier']}] Tweet {item['tweet_id']} by @{item['author']} (Score: {item['virality_score']}) [Keyword: {item['keyword']}]")
+        show_queue(repo)
+        return
 
     # Grounding engine
     grounding = GroundingEngine(
