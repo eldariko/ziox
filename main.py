@@ -3,13 +3,19 @@
 import argparse
 import sys
 import logging
+
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 from config.settings import get_settings
 from database.repository import Repository
 from providers.mock_provider import MockTwitterProvider
 from providers.zernio_provider import ZernioTwitterProvider
+from providers.twikit_provider import TwikitTwitterProvider
 from engine.grounding import GroundingEngine
 from engine.orchestrator import BotOrchestrator
-from engine.radar import DiscoveryRadar
+from engine.radar import DiscoveryRadar, extract_tweet_id
 
 logging.basicConfig(
     level=logging.INFO,
@@ -114,6 +120,16 @@ def main():
         help="Display all candidate tweets currently in the queue"
     )
     parser.add_argument(
+        "--process-queue",
+        action="store_true",
+        help="Process candidate tweets waiting in the DISCOVERED queue"
+    )
+    parser.add_argument(
+        "--process-tweet",
+        type=str,
+        help="Target and process a specific tweet by URL or ID end-to-end"
+    )
+    parser.add_argument(
         "--run-once",
         action="store_true",
         help="Execute a single monitoring, verification, and engagement cycle"
@@ -125,8 +141,8 @@ def main():
     )
     parser.add_argument(
         "--provider",
-        choices=["mock", "zernio"],
-        help="Override Twitter provider ('mock' or 'zernio')"
+        choices=["mock", "zernio", "twikit"],
+        help="Override Twitter provider ('mock', 'zernio', or 'twikit')"
     )
     parser.add_argument(
         "-i", "--interactive",
@@ -175,7 +191,13 @@ def main():
         return
 
     # Choose Twitter provider
-    if settings.twitter_provider == "zernio":
+    if settings.twitter_provider == "twikit":
+        provider = TwikitTwitterProvider(
+            auth_token=settings.x_auth_token,
+            ct0=settings.x_ct0,
+            cookies_file=settings.x_cookies_file
+        )
+    elif settings.twitter_provider == "zernio":
         if not settings.zernio_api_key:
             logger.error("ZERNIO_API_KEY is not configured in .env. Exiting.")
             sys.exit(1)
@@ -213,6 +235,28 @@ def main():
         provider=provider,
         grounding_engine=grounding
     )
+
+    # Process queue or targeted tweet
+    if args.process_queue or args.process_tweet:
+        target_id = extract_tweet_id(args.process_tweet) if args.process_tweet else None
+        mode_label = "Interactive" if args.interactive else "Standard"
+        print(f"\n[zioX Responder] Processing queue (Mode: {mode_label}, Provider: {settings.twitter_provider}, Dry Run: {settings.dry_run})...")
+        report = orchestrator.process_queue(
+            interactive=args.interactive,
+            target_tweet_id=target_id
+        )
+        print(f"[zioX Responder] Queue processing finished with status: {report['status']}")
+        print(f"                 Tweets processed: {report['processed']}")
+        print(f"                 Replies planned/sent: {report['replies_sent']}")
+        if report.get("results"):
+            print("\nGenerated Responses:")
+            for item in report["results"]:
+                print(f" - Tweet ID: {item['tweet_id']} (@{item['author']}) | Score: {item['virality_score']}")
+                print(f"   Claim: {item['claim']}")
+                print(f"   Reply: {item['reply']}")
+                print(f"   Published: {item['published']}\n")
+        show_status(repo, settings)
+        return
 
     if args.run_once or args.interactive or len(sys.argv) == 1:
         mode_label = "Interactive" if args.interactive else "Standard"

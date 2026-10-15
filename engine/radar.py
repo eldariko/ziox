@@ -1,6 +1,7 @@
 """Discovery Radar module for finding and queuing viral candidate tweets on X."""
 
 import re
+import time
 import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
@@ -100,7 +101,9 @@ class DiscoveryRadar:
         """
         enqueued_items: List[Dict[str, Any]] = []
 
-        for keyword in keywords:
+        for idx, keyword in enumerate(keywords):
+            if idx > 0:
+                time.sleep(1.2)
             try:
                 tweets = provider.search_recent_tweets(keyword, limit=limit_per_keyword)
                 for tweet in tweets:
