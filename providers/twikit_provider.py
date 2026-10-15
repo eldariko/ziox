@@ -36,7 +36,7 @@ def _apply_twikit_patches():
             except Exception:
                 self.home_page_response = None
                 raise
-        tx_mod.ClientTransaction.init = safe_init
+            tx_mod.ClientTransaction.init = safe_init
 
         # 3. Patch get_indices to resolve ondemand.s via chunk index -> chunk hash
         async def patched_get_indices(self, home_page_response, session, headers):
@@ -204,6 +204,13 @@ class TwikitTwitterProvider(BaseTwitterProvider):
     ) -> Dict[str, Any]:
         """Post a direct in-thread reply to any tweet on X."""
         try:
+            # Defensive guard against exceeding Twitter 280-char limit (Error 186)
+            try:
+                from engine.humanizer import Humanizer
+                text = Humanizer.enforce_length_limit(text, max_length=280)
+            except Exception as guard_err:
+                logger.warning(f"Could not apply Humanizer length guard: {guard_err}")
+
             result = _run_coro(self.client.create_tweet(
                 text=text,
                 reply_to=reply_to_tweet_id

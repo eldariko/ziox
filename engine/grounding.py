@@ -26,9 +26,10 @@ CORE PRINCIPLES:
    - If the target tweet is in Arabic, draft your reply in natural, fluent, modern standard Arabic.
    - If the target tweet is in English or any other language, draft your reply in natural English.
    - NEVER generate replies in other languages (such as French, Spanish, or Hebrew).
-4. Natural Human Cadence:
+4. Natural Human Cadence & Strict Twitter Limit:
    - NEVER use the em-dash (—). Use commas or standard dashes.
-   - Keep responses strictly between 1 and 3 sentences.
+   - Keep responses strictly between 1 and 2 concise sentences.
+   - STRICT LENGTH LIMIT: Tweets on X cannot exceed 280 characters. Accounting for attached proof links (which take 23 characters), your draft_reply MUST NEVER EXCEED 220 CHARACTERS. Be concise, punchy, and direct.
    - Do NOT sound like a press release, an essay, or an AI summary.
    - Avoid robotic clichés and conversational filler.
 5. Evaluation:
@@ -41,7 +42,7 @@ You MUST respond strictly in valid JSON format matching this schema:
   "claim_identified": "summary of the false or misleading claim",
   "verified_facts": ["fact 1 with source/detail", "fact 2"],
   "recommended_link": "optional url to official data or null",
-  "draft_reply": "1-3 punchy, composed human sentences rebutting the claim in English or Arabic"
+  "draft_reply": "1-2 punchy, composed human sentences rebutting the claim in English or Arabic (STRICTLY UNDER 220 CHARACTERS)"
 }
 """
 
@@ -58,9 +59,11 @@ class FactCheckResult(BaseModel):
 class GroundingEngine:
     """Manages fact verification and grounded response drafting via Gemini."""
 
-    def __init__(self, api_key: str = "", model_name: str = "gemini-3.5-flash-lite"):
+    def __init__(self, api_key: str = "", model_name: str = "gemini-3.5-flash-lite", enable_search: bool = False):
         self.api_key = api_key
         self.model_name = model_name
+        self.enable_search = enable_search
+        self.search_available = enable_search
         self.client = None
 
         if self.api_key:
@@ -101,14 +104,14 @@ class GroundingEngine:
                     draft_reply=""
                 )
 
-        # Production Gemini Call with Google Search Grounding and Retry Logic
-        prompt = f"Tweet by @{author_handle}:\n\"{tweet_text}\"\n\nEvaluate the tweet, verify facts via Google Search if necessary, and provide structured JSON."
+        # Production Gemini Call with optional Google Search Grounding and Retry Logic
+        prompt = f"Tweet by @{author_handle}:\n\"{tweet_text}\"\n\nEvaluate the tweet, verify facts if necessary, and provide structured JSON."
 
         config_params = {
             "system_instruction": SYSTEM_PROMPT,
             "response_mime_type": "application/json"
         }
-        if types is not None:
+        if self.search_available and types is not None:
             try:
                 config_params["tools"] = [types.Tool(google_search=types.GoogleSearch())]
             except Exception as tool_err:
@@ -148,12 +151,21 @@ class GroundingEngine:
             except Exception as e:
                 err_str = str(e)
                 last_error = err_str
+
+                # If Google Search Grounding quota is exhausted (429 RESOURCE_EXHAUSTED), disable search immediately
+                if "tools" in config_params and ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str):
+                    logger.warning("Google Search Grounding quota exceeded (free tier). Disabling search tool and continuing with standard Gemini generation.")
+                    config_params.pop("tools", None)
+                    self.search_available = False
+                    continue
+
                 if "503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str:
                     logger.warning(f"Google API busy (attempt {attempt + 1}/{max_retries}): {err_str}. Retrying in {backoff_seconds}s...")
                     time.sleep(backoff_seconds)
                     backoff_seconds *= 2.0
-                    if "tools" in config_params and attempt >= 1:
+                    if "tools" in config_params:
                         config_params.pop("tools", None)
+                        self.search_available = False
                     continue
                 else:
                     logger.error(f"Error calling Gemini Grounding Engine: {e}")

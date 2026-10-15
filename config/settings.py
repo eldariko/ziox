@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     # API Keys & Models
     gemini_api_key: str = Field(default="", description="Google Gemini API Key")
     gemini_model: str = Field(default="gemini-3.5-flash-lite", description="Gemini Model Name")
+    gemini_search_grounding: bool = Field(default=False, description="Enable Google Search Grounding (requires billing/quota)")
     zernio_api_key: str = Field(default="", description="Zernio API Key")
     zernio_twitter_account_id: str = Field(default="", description="Zernio connected X Account ID")
 

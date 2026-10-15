@@ -145,6 +145,11 @@ def main():
         help="Override Twitter provider ('mock', 'zernio', or 'twikit')"
     )
     parser.add_argument(
+        "--threshold",
+        type=float,
+        help="Override minimum virality threshold score (e.g. --threshold 1.0)"
+    )
+    parser.add_argument(
         "-i", "--interactive",
         action="store_true",
         help="Enable Human-in-the-Loop review mode before any reply is sent"
@@ -158,6 +163,9 @@ def main():
 
     if args.provider:
         settings.twitter_provider = args.provider
+
+    if args.threshold is not None:
+        settings.virality_threshold = args.threshold
 
     repo = Repository(settings.database_path)
 
@@ -226,7 +234,8 @@ def main():
     # Grounding engine
     grounding = GroundingEngine(
         api_key=settings.gemini_api_key,
-        model_name=settings.gemini_model
+        model_name=settings.gemini_model,
+        enable_search=settings.gemini_search_grounding
     )
 
     orchestrator = BotOrchestrator(

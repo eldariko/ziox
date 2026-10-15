@@ -106,7 +106,7 @@ class BotOrchestrator:
                 )
                 continue
 
-            # 5. Anti-Bot Humanizer
+            # 5. Anti-Bot Humanizer (enforces 280-char limit)
             final_reply = Humanizer.sanitize(
                 text=eval_result.draft_reply,
                 link=eval_result.recommended_link
@@ -115,6 +115,7 @@ class BotOrchestrator:
             # Interactive Human-in-the-Loop review
             if interactive:
                 tier = get_virality_tier(tweet)
+                char_count = Humanizer.calculate_tweet_length(final_reply)
                 print("\n" + "=" * 65)
                 print("           [HUMAN-IN-THE-LOOP INTERACTIVE REVIEW]")
                 print("=" * 65)
@@ -125,6 +126,7 @@ class BotOrchestrator:
                 if eval_result.verified_facts:
                     print(f" Facts Cited  : {' | '.join(eval_result.verified_facts)}")
                 print(f" Draft Reply  : {final_reply}")
+                print(f" Length       : {char_count}/280 chars{' (OK)' if char_count <= 280 else ' [EXCEEDS LIMIT!]'}")
                 print("-" * 65)
                 print(" Action choices: [A]pprove & Send | [E]dit Draft | [S]kip Tweet | [Q]uit Cycle")
                 try:
@@ -155,7 +157,12 @@ class BotOrchestrator:
                             text=edited_text,
                             link=eval_result.recommended_link
                         )
+                        char_count = Humanizer.calculate_tweet_length(final_reply)
                         print(f" [Updated Reply]: {final_reply}")
+                        print(f" [New Length]   : {char_count}/280 chars{' (OK)' if char_count <= 280 else ' [EXCEEDS LIMIT!]'}")
+
+            # Ensure final reply does not exceed Twitter 280 limit before dispatching
+            final_reply = Humanizer.enforce_length_limit(final_reply, max_length=280)
 
             # 6. Publish or Dry-Run
             was_published = False
@@ -186,7 +193,8 @@ class BotOrchestrator:
                 reply_generated=final_reply,
                 link_attached=eval_result.recommended_link,
                 virality_score=virality_score,
-                was_published=was_published
+                was_published=was_published,
+                status="PUBLISHED" if was_published else ("PROCESSED_DRY_RUN" if self.settings.dry_run else "FAILED")
             )
 
             results.append({
@@ -309,7 +317,7 @@ class BotOrchestrator:
                 logger.info(f"Tweet {tweet_id} not worth replying (factual claim missing or unsupported).")
                 continue
 
-            # 4. Anti-Bot Humanizer
+            # 4. Anti-Bot Humanizer (enforces 280-char limit)
             final_reply = Humanizer.sanitize(
                 text=eval_result.draft_reply,
                 link=eval_result.recommended_link
@@ -318,6 +326,7 @@ class BotOrchestrator:
             # 5. Interactive Human-in-the-Loop review
             if interactive:
                 tier = get_virality_tier(tweet_obj)
+                char_count = Humanizer.calculate_tweet_length(final_reply)
                 print("\n" + "=" * 65)
                 print("           [HUMAN-IN-THE-LOOP INTERACTIVE REVIEW]")
                 print("=" * 65)
@@ -328,6 +337,7 @@ class BotOrchestrator:
                 if eval_result.verified_facts:
                     print(f" Facts Cited  : {' | '.join(eval_result.verified_facts)}")
                 print(f" Draft Reply  : {final_reply}")
+                print(f" Length       : {char_count}/280 chars{' (OK)' if char_count <= 280 else ' [EXCEEDS LIMIT!]'}")
                 print("-" * 65)
                 print(" Action choices: [A]pprove & Send | [E]dit Draft | [S]kip Tweet | [Q]uit Cycle")
                 try:
@@ -352,7 +362,12 @@ class BotOrchestrator:
                             text=edited_text,
                             link=eval_result.recommended_link
                         )
+                        char_count = Humanizer.calculate_tweet_length(final_reply)
                         print(f" [Updated Reply]: {final_reply}")
+                        print(f" [New Length]   : {char_count}/280 chars{' (OK)' if char_count <= 280 else ' [EXCEEDS LIMIT!]'}")
+
+            # Ensure final reply does not exceed Twitter 280 limit before dispatching
+            final_reply = Humanizer.enforce_length_limit(final_reply, max_length=280)
 
             # 6. Publish or Dry-Run
             was_published = False

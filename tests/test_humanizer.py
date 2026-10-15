@@ -23,7 +23,7 @@ def test_sentence_limit():
 
 def test_full_sanitize_with_link():
     raw = "Delving into the history—facts remain clear. Over 20,000 trucks entered."
-    link = "https://govextra.gov.il/cogat/"
+    link = "https://govextra.gov.il/cogat/humanitarian-efforts/home/"
     sanitized = Humanizer.sanitize(raw, link=link)
 
     assert "—" not in sanitized
@@ -49,6 +49,50 @@ def test_whitelisted_link_auto_attach():
     # Arabic test for partition claim
     raw_ar = "وافقت إسرائيل على قرار التقسيم رقم 181 عام 1947."
     sanitized_ar = Humanizer.sanitize(raw_ar)
-    assert "https://www.un.org/unispal/document/auto-insert-179838/" in sanitized_ar
+    assert "https://www.un.org/unispal/document/auto-insert-185393/" in sanitized_ar
 
 
+def test_calculate_tweet_length():
+    # URLs count as 23 characters regardless of length
+    url = "https://avalon.law.yale.edu/20th_century/geneva07.asp"
+    assert Humanizer.calculate_tweet_length(url) == 23
+
+    # Normal ASCII
+    assert Humanizer.calculate_tweet_length("Hello world") == 11
+
+    # Text + URL
+    text_with_url = f"Check this fact {url}"
+    # "Check this fact " is 16 chars + 23 for URL = 39 chars
+    assert Humanizer.calculate_tweet_length(text_with_url) == 39
+
+    # Emoji counts as 2
+    assert Humanizer.calculate_tweet_length("🚨") == 2
+
+
+def test_sanitize_prevents_error_186_tweet_too_long():
+    # Exact text from the failed execution in the terminal log
+    failing_text = (
+        "Tragic loss of life in urban warfare is always heartbreaking, but repeating unverified sensationalist "
+        "claims does nothing to help the people affected. Urban combat against embedded militants who use human "
+        "shields results in complex tragedies, not deliberate atrocities."
+    )
+    link = "https://avalon.law.yale.edu/20th_century/geneva07.asp"
+
+    sanitized = Humanizer.sanitize(failing_text, link=link)
+    length = Humanizer.calculate_tweet_length(sanitized)
+
+    assert length <= 280
+    assert link in sanitized
+    assert "Tragic loss of life" in sanitized
+
+
+def test_enforce_length_limit_word_boundary():
+    # Extremely long single sentence without sentence terminators
+    very_long = "word " * 70  # 350 chars
+    link = "https://example.com/source"
+    full_text = f"{very_long}{link}"
+
+    limited = Humanizer.enforce_length_limit(full_text, max_length=280)
+    assert Humanizer.calculate_tweet_length(limited) <= 280
+    assert link in limited
+    assert limited.endswith(link)
