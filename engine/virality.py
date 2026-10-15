@@ -17,6 +17,18 @@ def calculate_virality_score(tweet: Tweet) -> float:
     return round(weighted_engagements / time_denominator, 2)
 
 
+def get_virality_tier(tweet: Tweet) -> str:
+    """Classify tweet momentum into actionable priority tiers."""
+    score = calculate_virality_score(tweet)
+    if score >= 20.0:
+        return "VIRAL_EXPLOSIVE"
+    elif score >= 10.0:
+        return "VIRAL_HIGH"
+    elif score >= 5.0:
+        return "VIRAL_EMERGING"
+    return "LOW_TRACTION"
+
+
 def is_viral_candidate(tweet: Tweet, threshold: float = 5.0) -> bool:
     """Return True if virality momentum score meets or exceeds threshold."""
     score = calculate_virality_score(tweet)

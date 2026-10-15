@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     monthly_max_replies: int = Field(default=30, description="Maximum total replies per month")
     max_thread_turns: int = Field(default=2, description="Maximum turns per thread before disengaging")
 
-    # Keywords for X search
+    # Keywords for X search (English and Arabic)
     search_keywords: List[str] = Field(
         default=[
             "Israel",
@@ -37,7 +37,10 @@ class Settings(BaseSettings):
             "IDF",
             "Zionism",
             "Hostages",
-            "Middle East"
+            "Middle East",
+            "إسرائيل",
+            "غزة",
+            "مساعدات غزة"
         ]
     )
 

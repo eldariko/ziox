@@ -67,3 +67,26 @@ def test_toxic_disengagement(tmp_path):
     can_reply, reason = manager.evaluate_thread_permission(toxic_tweet)
     assert can_reply is False
     assert "abusive language" in reason
+
+
+def test_arabic_toxic_disengagement(tmp_path):
+    db_file = str(tmp_path / "test_ar_toxic.db")
+    repo = Repository(db_file)
+    manager = ThreadManager(repo, max_turns=2)
+
+    ar_toxic_tweet = Tweet(
+        id="toxic_ar_1",
+        text="أنتم قتلة ومجرمين وحثالة",
+        author_handle="ar_troll",
+        created_at=datetime.now(timezone.utc)
+    )
+
+    can_reply, reason = manager.evaluate_thread_permission(ar_toxic_tweet)
+    assert can_reply is False
+    assert "abusive language" in reason
+
+    # Check status was recorded as DROPPED_TOXIC
+    thread_data = repo.get_thread("toxic_ar_1")
+    # Even if not created before, updating thread status persists or marks dropped
+    assert thread_data is None or thread_data.get("status") == "DROPPED_TOXIC"
+

@@ -5,16 +5,41 @@ from typing import Tuple
 from database.repository import Repository
 from providers.base import Tweet
 
-# Obvious harassment/slur patterns for instant disengagement
+# Obvious harassment/slur patterns for instant disengagement (English & Arabic)
 TOXIC_PATTERNS = [
+    # English slurs, profanity, and bad-faith abuse
     r"\bpig[s]?\b",
     r"\bmurderer[s]?\b",
     r"\bnazi[s]?\b",
+    r"\bzionazi[s]?\b",
     r"\bfuck\b",
     r"\bshit\b",
+    r"\bbitch\b",
+    r"\basshole[s]?\b",
     r"\bshut\s*up\b",
+    r"\bstfu\b",
     r"\bterrorist[s]?\b",
     r"\bcolonizer[s]?\b",
+    r"\bscum\b",
+    r"\bgenocidal\s+freak[s]?\b",
+
+    # Arabic slurs, profanity, and bad-faith abuse
+    r"\bخنزير\b",
+    r"\bخنازير\b",
+    r"\bقتلة\b",
+    r"\bقاتل\b",
+    r"\bمجرمين\b",
+    r"\bإرهابيين\b",
+    r"\bإرهابي\b",
+    r"\bصهيوني\s+حقير\b",
+    r"\bصهاينة\s+حقراء\b",
+    r"\bكلاب\b",
+    r"\bكلب\b",
+    r"\bاخرس\b",
+    r"\bاسكت\b",
+    r"\bحثالة\b",
+    r"\bنازي\b",
+    r"\bنازيين\b"
 ]
 
 TOXIC_REGEX = re.compile("|".join(TOXIC_PATTERNS), re.IGNORECASE)
