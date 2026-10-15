@@ -37,10 +37,10 @@
       "سلام"
     ],
     "sources": {
-      "en": "https://www.un.org/unispal/document/auto-insert-179838/",
-      "ar": "https://www.un.org/unispal/document/auto-insert-179838/"
+      "en": "https://www.un.org/unispal/document/auto-insert-185393/",
+      "ar": "https://www.un.org/unispal/document/auto-insert-185393/"
     },
-    "description": "United Nations General Assembly Resolution 181 (II) official UNISPAL archival record."
+    "description": "United Nations General Assembly Resolution 181 (II) official Partition Plan archival document."
   },
   "law_of_armed_conflict": {
     "topic": "Law of Armed Conflict & Military Necessity",
@@ -50,15 +50,16 @@
       "genocide",
       "civilian casualty",
       "human shield",
+      "geneva",
       "جرائم حرب",
       "دروع بشرية",
       "قانون دولي"
     ],
     "sources": {
-      "en": "https://www.idf.il/en/mini-sites/military-advocate-general-s-corps/",
-      "ar": "https://www.idf.il/en/mini-sites/military-advocate-general-s-corps/"
+      "en": "https://avalon.law.yale.edu/20th_century/geneva07.asp",
+      "ar": "https://avalon.law.yale.edu/20th_century/geneva07.asp"
     },
-    "description": "Military Advocate General's Corps international legal framework."
+    "description": "Geneva Convention IV Article 28 - Prohibition of using civilians as human shields to shield military operations."
   },
   "hostages": {
     "topic": "Hostages & Oct 7 Civilian Abductions",
@@ -72,9 +73,9 @@
       "٧ أكتوبر"
     ],
     "sources": {
-      "en": "https://www.gov.il/en/departments/news/swords-of-iron-hostages-and-missing",
-      "ar": "https://www.gov.il/en/departments/news/swords-of-iron-hostages-and-missing"
+      "en": "https://www.ajc.org/news/what-is-known-about-israeli-hostages-taken-by-hamas",
+      "ar": "https://www.ajc.org/news/what-is-known-about-israeli-hostages-taken-by-hamas"
     },
-    "description": "Official government database of verified hostages and missing persons."
+    "description": "Comprehensive verified tracker, timeline, and profiles of hostages taken on October 7."
   }
 }
