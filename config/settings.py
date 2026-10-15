@@ -19,9 +19,14 @@ class Settings(BaseSettings):
     zernio_api_key: str = Field(default="", description="Zernio API Key")
     zernio_twitter_account_id: str = Field(default="", description="Zernio connected X Account ID")
 
+    # X / Twitter Session Authentication
+    x_auth_token: str = Field(default="", description="X session auth_token cookie")
+    x_ct0: str = Field(default="", description="X session ct0 CSRF token cookie")
+    x_cookies_file: str = Field(default="cookies.json", description="Path to saved X cookies JSON file")
+
     # Bot Execution Mode
     dry_run: bool = Field(default=True, description="When True, no live posts are sent to X")
-    twitter_provider: str = Field(default="mock", description="'mock' or 'zernio'")
+    twitter_provider: str = Field(default="mock", description="'mock', 'zernio', or 'twikit'")
     database_path: str = Field(default="ziox.db", description="Path to SQLite database file")
 
     # Scoring & Quotas
