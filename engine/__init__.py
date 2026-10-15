@@ -3,6 +3,7 @@ from engine.thread_state import ThreadManager
 from engine.grounding import GroundingEngine, FactCheckResult
 from engine.humanizer import Humanizer
 from engine.orchestrator import BotOrchestrator
+from engine.radar import DiscoveryRadar, extract_tweet_id
 
 __all__ = [
     "calculate_virality_score",
@@ -12,5 +13,7 @@ __all__ = [
     "GroundingEngine",
     "FactCheckResult",
     "Humanizer",
-    "BotOrchestrator"
+    "BotOrchestrator",
+    "DiscoveryRadar",
+    "extract_tweet_id"
 ]

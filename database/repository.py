@@ -19,11 +19,16 @@ class Repository:
         return conn
 
     def _init_db(self) -> None:
-        """Create tables if they do not exist."""
+        """Create tables if they do not exist, and migrate columns."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             for stmt in INIT_STATEMENTS:
                 cursor.execute(stmt)
+            # Migration check for status column
+            cursor.execute("PRAGMA table_info(processed_tweets)")
+            columns = [col["name"] for col in cursor.fetchall()]
+            if "status" not in columns:
+                cursor.execute("ALTER TABLE processed_tweets ADD COLUMN status TEXT DEFAULT 'PROCESSED'")
             conn.commit()
 
     # --- Tweet Operations ---
@@ -35,6 +40,74 @@ class Repository:
             cursor.execute("SELECT 1 FROM processed_tweets WHERE tweet_id = ?", (tweet_id,))
             return cursor.fetchone() is not None
 
+    def enqueue_tweet(
+        self,
+        tweet_id: str,
+        author_handle: str,
+        tweet_text: str,
+        virality_score: float = 0.0,
+        parent_tweet_id: Optional[str] = None
+    ) -> bool:
+        """
+        Enqueue a discovered tweet for processing.
+        Returns True if newly enqueued, False if already exists.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO processed_tweets (
+                    tweet_id, parent_tweet_id, author_handle, tweet_text,
+                    virality_score, status, was_published
+                ) VALUES (?, ?, ?, ?, ?, 'DISCOVERED', 0)
+                """,
+                (tweet_id, parent_tweet_id, author_handle, tweet_text, virality_score)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_pending_tweets(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Fetch discovered tweets awaiting evaluation or action, ordered by virality momentum."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM processed_tweets
+                WHERE status = 'DISCOVERED'
+                ORDER BY virality_score DESC, created_at DESC
+                LIMIT ?
+                """,
+                (limit,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def update_tweet_status(
+        self,
+        tweet_id: str,
+        status: str,
+        reply_generated: Optional[str] = None,
+        link_attached: Optional[str] = None,
+        was_published: Optional[bool] = None
+    ) -> None:
+        """Update processing status and details of a queued tweet."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            updates = ["status = ?"]
+            params: List[Any] = [status]
+            if reply_generated is not None:
+                updates.append("reply_generated = ?")
+                params.append(reply_generated)
+            if link_attached is not None:
+                updates.append("link_attached = ?")
+                params.append(link_attached)
+            if was_published is not None:
+                updates.append("was_published = ?")
+                params.append(1 if was_published else 0)
+            params.append(tweet_id)
+            query = f"UPDATE processed_tweets SET {', '.join(updates)} WHERE tweet_id = ?"
+            cursor.execute(query, params)
+            conn.commit()
+
     def save_processed_tweet(
         self,
         tweet_id: str,
@@ -45,7 +118,8 @@ class Repository:
         reply_generated: Optional[str] = None,
         link_attached: Optional[str] = None,
         media_attached: Optional[str] = None,
-        was_published: bool = False
+        was_published: bool = False,
+        status: str = "PROCESSED"
     ) -> int:
         """Store a processed tweet."""
         with self._get_connection() as conn:
@@ -55,13 +129,13 @@ class Repository:
                 INSERT INTO processed_tweets (
                     tweet_id, parent_tweet_id, author_handle, tweet_text,
                     reply_generated, link_attached, media_attached,
-                    was_published, virality_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    was_published, virality_score, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     tweet_id, parent_tweet_id, author_handle, tweet_text,
                     reply_generated, link_attached, media_attached,
-                    1 if was_published else 0, virality_score
+                    1 if was_published else 0, virality_score, status
                 )
             )
             conn.commit()
