@@ -21,10 +21,11 @@
 | **Step 2** | **Google Search Grounding & Web Fact Citations** | **COMPLETED** | `engine/grounding.py` |
 | **Step 3** | **Advocacy Persona & System Prompt Tuning** | **COMPLETED** | `engine/grounding.py`, `engine/humanizer.py` |
 | **Step 4** | **Verified Fact & Whitelisted Links Vault** | **COMPLETED** | `assets/proofs/whitelisted_sources.json`, `engine/humanizer.py` |
-| **Step 5** | **Virality Threshold & Keyword Calibration** | **NEXT** | `config/settings.py`, `engine/virality.py` |
-| **Step 6** | **Multi-Turn Thread State & Anti-Troll Rules** | PENDING | `engine/thread_state.py` |
-| **Step 7** | **Interactive Human-in-the-Loop Mode** | PENDING | `main.py` |
-| **Step 8** | **Live Twitter / X Integration (Zernio/Direct)** | PENDING | `.env`, `providers/zernio_provider.py` |
+| **Step 5** | **Virality Threshold & Keyword Calibration** | **COMPLETED** | `config/settings.py`, `engine/virality.py`, `engine/orchestrator.py` |
+| **Step 6** | **Multi-Turn Thread State & Anti-Troll Rules** | **COMPLETED** | `engine/thread_state.py` |
+| **Step 7** | **Interactive Human-in-the-Loop Mode** | **COMPLETED** | `main.py`, `engine/orchestrator.py` |
+| **Step 8A** | **Decoupled Discovery Radar & Tweet Queue** | **NEXT** | `engine/radar.py`, `database/schema.py`, `database/repository.py` |
+| **Step 8B** | **Targeted Action & Reply Dispatcher** | PENDING | `providers/direct_provider.py`, `main.py` |
 | **Step 9** | **Autonomous Scheduler & Safety Pacing** | PENDING | `scheduler.py` |
 
 ---
@@ -56,31 +57,43 @@
 
 ---
 
-### Step 5: Virality Threshold & Keyword Calibration
-* **Goal**: Calibrate search keywords (`Israel`, `Gaza aid`, `IDF`, `Zionism`) and fine-tune the velocity formula threshold to catch fast-moving posts before peak virality.
-* **Files**: [`config/settings.py`](file:///C:/Users/User/PycharmProjects/zioX/config/settings.py), [`engine/virality.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/virality.py)
-* **Verification Command**: `pytest tests/test_virality.py`
+### Step 5: Virality Threshold & Keyword Calibration (Completed)
+* **Goal**: Calibrate search keywords (`Israel`, `Gaza aid`, `IDF`, `Zionism`, `إسرائيل`, `غزة`, `مساعدات غزة`) and fine-tune velocity momentum scoring.
+* **Result**: Implemented virality tier classifier (`VIRAL_EXPLOSIVE`, `VIRAL_HIGH`, `VIRAL_EMERGING`). Updated orchestrator to sort and prioritize candidate posts by momentum. 12/12 unit tests passing.
 
 ---
 
-### Step 6: Multi-Turn Conversation & Disengagement Tuning
+### Step 6: Multi-Turn Conversation & Disengagement Tuning (Completed)
 * **Goal**: Validate thread state progression: Turn 1 (Factual rebuttal) $\to$ Turn 2 (Follow-up evidence) $\to$ Turn 3 (Auto-disengage). Instant termination upon detecting abusive or bad-faith trolling.
-* **Files**: [`engine/thread_state.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/thread_state.py)
-* **Verification Command**: `pytest tests/test_thread_state.py`
+* **Result**: Added comprehensive bilingual (English & Arabic) slur and troll filter patterns. Enforced automatic thread disengagement (`DROPPED_TOXIC`, `COMPLETED`). 13/13 unit tests passing.
 
 ---
 
-### Step 7: Interactive Human-in-the-Loop Mode
-* **Goal**: Add CLI flag `--interactive` that displays proposed replies for review: `[Y]es to publish / [N]o to skip / [E]dit text`.
-* **Files**: [`main.py`](file:///C:/Users/User/PycharmProjects/zioX/main.py)
-* **Verification Command**: `python main.py --interactive` in dry-run mode.
+### Step 7: Interactive Human-in-the-Loop Mode (Completed)
+* **Goal**: Add CLI flag `--interactive` that displays proposed replies for review: `[A]pprove & Send / [E]dit Draft / [S]kip Tweet / [Q]uit Cycle`.
+* **Result**: Implemented terminal prompt with full context (claim, virality tier, facts, reply). Added text editing, skipping, and graceful exit. 14/14 unit tests passing.
 
 ---
 
-### Step 8: Live Twitter / X Integration
-* **Goal**: Connect live X credentials (via Zernio API or chosen connector) and test live search and reply publishing in staging mode.
-* **Files**: [`.env`](file:///C:/Users/User/PycharmProjects/zioX/.env), [`providers/zernio_provider.py`](file:///C:/Users/User/PycharmProjects/zioX/providers/zernio_provider.py)
-* **Verification Command**: Fetch live matching tweets from X without publishing.
+### Step 8A: Decoupled Discovery Radar & Tweet Queue (Next)
+* **Goal**: Implement the Discovery Radar tool (`engine/radar.py`) that discovers candidate viral tweets across target keywords (or via manual URL/ID ingestion) and queues them into SQLite with `status='DISCOVERED'`.
+* **Key Components**:
+  - Update SQLite schema & repository with status tracking (`DISCOMMITTED`/`DISCOVERED`, `APPROVED`, `PUBLISHED`, `SKIPPED`).
+  - Radar discovery engine capable of ingesting tweets via keyword search or direct tweet URL/ID.
+  - CLI command: `python main.py radar --keywords` and `python main.py queue-tweet <url_or_id>`.
+* **Files**: [`database/schema.py`](file:///C:/Users/User/PycharmProjects/zioX/database/schema.py), [`database/repository.py`](file:///C:/Users/User/PycharmProjects/zioX/database/repository.py), [`engine/radar.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/radar.py), [`main.py`](file:///C:/Users/User/PycharmProjects/zioX/main.py)
+* **Verification Command**: Ingest a sample tweet URL/ID into the DB queue and verify it appears with status `DISCOVERED`.
+
+---
+
+### Step 8B: Targeted Action & Reply Dispatcher (Pending)
+* **Goal**: Implement the Targeted Action/Responder tool that pulls `DISCOVERED` tweets from the queue, evaluates thread state, runs Gemini Google Search grounding, humanizes the response, and posts the reply via an authenticated session.
+* **Key Components**:
+  - Responder module reading from SQLite queue or a specific target tweet ID.
+  - Interactive approval or automated dispatch with anti-bot pacing.
+  - Direct posting integration (Playwright browser session or authenticated connector).
+* **Files**: `engine/orchestrator.py`, `providers/direct_provider.py`, `main.py`
+* **Verification Command**: Process a queued tweet in dry-run mode and verify the full pipeline end-to-end.
 
 ---
 
