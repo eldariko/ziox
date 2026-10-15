@@ -24,8 +24,8 @@
 | **Step 5** | **Virality Threshold & Keyword Calibration** | **COMPLETED** | `config/settings.py`, `engine/virality.py`, `engine/orchestrator.py` |
 | **Step 6** | **Multi-Turn Thread State & Anti-Troll Rules** | **COMPLETED** | `engine/thread_state.py` |
 | **Step 7** | **Interactive Human-in-the-Loop Mode** | **COMPLETED** | `main.py`, `engine/orchestrator.py` |
-| **Step 8A** | **Decoupled Discovery Radar & Tweet Queue** | **NEXT** | `engine/radar.py`, `database/schema.py`, `database/repository.py` |
-| **Step 8B** | **Targeted Action & Reply Dispatcher** | PENDING | `providers/direct_provider.py`, `main.py` |
+| **Step 8A** | **Decoupled Discovery Radar & Tweet Queue** | **COMPLETED** | `engine/radar.py`, `database/schema.py`, `database/repository.py`, `main.py` |
+| **Step 8B** | **Targeted Action & Reply Dispatcher** | **NEXT** | `engine/orchestrator.py`, `providers/direct_provider.py`, `main.py` |
 | **Step 9** | **Autonomous Scheduler & Safety Pacing** | PENDING | `scheduler.py` |
 
 ---
@@ -75,14 +75,13 @@
 
 ---
 
-### Step 8A: Decoupled Discovery Radar & Tweet Queue (Next)
+### Step 8A: Decoupled Discovery Radar & Tweet Queue (Completed)
 * **Goal**: Implement the Discovery Radar tool (`engine/radar.py`) that discovers candidate viral tweets across target keywords (or via manual URL/ID ingestion) and queues them into SQLite with `status='DISCOVERED'`.
-* **Key Components**:
-  - Update SQLite schema & repository with status tracking (`DISCOMMITTED`/`DISCOVERED`, `APPROVED`, `PUBLISHED`, `SKIPPED`).
-  - Radar discovery engine capable of ingesting tweets via keyword search or direct tweet URL/ID.
-  - CLI command: `python main.py radar --keywords` and `python main.py queue-tweet <url_or_id>`.
-* **Files**: [`database/schema.py`](file:///C:/Users/User/PycharmProjects/zioX/database/schema.py), [`database/repository.py`](file:///C:/Users/User/PycharmProjects/zioX/database/repository.py), [`engine/radar.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/radar.py), [`main.py`](file:///C:/Users/User/PycharmProjects/zioX/main.py)
-* **Verification Command**: Ingest a sample tweet URL/ID into the DB queue and verify it appears with status `DISCOVERED`.
+* **Result**:
+  - Enhanced SQLite schema and repository with status lifecycle (`DISCOVERED`, `APPROVED`, `PUBLISHED`, `SKIPPED`) and automatic migration.
+  - Implemented `DiscoveryRadar` with regex-based URL parsing, virality calculation, and deduplication.
+  - Added CLI options `--queue-tweet`, `--queue-list`, and `--radar`.
+  - Comprehensive unit test suite: 17/17 passing tests (`tests/test_radar.py`).
 
 ---
 
