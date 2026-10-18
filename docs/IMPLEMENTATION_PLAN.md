@@ -44,7 +44,8 @@ flowchart LR
 | **Step 8B** | **Targeted Action & Reply Dispatcher** | **COMPLETED** | `engine/orchestrator.py`, `providers/twikit_provider.py`, `main.py` |
 | **Step 8C** | **Verified Link Validator & Live Citation Engine** | **COMPLETED** | `docs/plans/step_08c_link_validator.md`, `engine/link_validator.py`, `engine/humanizer.py`, `assets/proofs/whitelisted_sources.json` |
 | **Step 9** | **Anti-Ban Stealth Pacing & Rate Limiting** | **COMPLETED** | `docs/plans/step_09_stealth_pacing.md`, `config/settings.py`, `engine/orchestrator.py`, `database/repository.py`, `tests/test_stealth.py` |
-| **Step 10** | **External Scheduler & Unified Pipeline** | **READY FOR REVIEW** | `docs/plans/step_10_scheduler.md`, `config/settings.py`, `engine/orchestrator.py`, `main.py`, `scripts/run_pipeline.ps1`, `.github/workflows/ziox_cron.yml`, `tests/test_scheduler.py` |
+| **Step 10** | **External Scheduler & Unified Pipeline** | **COMPLETED** | `docs/plans/step_10_scheduler.md`, `config/settings.py`, `engine/orchestrator.py`, `main.py`, `scripts/run_pipeline.ps1`, `.github/workflows/ziox_cron.yml`, `tests/test_scheduler.py` |
+| **Step 11** | **Cloud Persistence via Turso / libSQL Adapter** | **COMPLETED** | `docs/plans/step_11_turso_cloud_db.md`, `pyproject.toml`, `config/settings.py`, `database/repository.py`, `main.py`, `.github/workflows/ziox_cron.yml`, `tests/test_turso_adapter.py` |
 
 ---
 
@@ -127,6 +128,26 @@ flowchart LR
 
 ---
 
-### Step 10: External Scheduler & Unified Pipeline Architecture (Ready for Review)
-* **Goal**: Transition from a costly, fragile 24/7 daemon loop to a serverless, external scheduler cron architecture. Implement single-command pipeline (--pipeline) with human start jitter, monthly ceiling hard-stops, and execution templates for local Windows Task Scheduler and GitHub Actions.
-* **Plan File**: [docs/plans/step_10_scheduler.md](file:///C:/Users/User/PycharmProjects/zioX/docs/plans/step_10_scheduler.md)
+### Step 10: External Scheduler & Unified Pipeline Architecture (Completed)
+* **Goal**: Transition from a costly, fragile 24/7 daemon loop to a serverless, external scheduler cron architecture. Implement single-command pipeline (`--pipeline`) with human start jitter, monthly ceiling hard-stops, and execution templates for local Windows Task Scheduler and GitHub Actions.
+* **Plan File**: [`docs/plans/step_10_scheduler.md`](file:///C:/Users/User/PycharmProjects/zioX/docs/plans/step_10_scheduler.md)
+* **Result**:
+  - Added `start_jitter_max_minutes` parameter in [`config/settings.py`](file:///C:/Users/User/PycharmProjects/zioX/config/settings.py).
+  - Implemented `run_full_pipeline()` in [`engine/orchestrator.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/orchestrator.py) chaining pre-run quota verification $\to$ randomized start-jitter $\to$ Discovery Radar $\to$ Stealth Responder.
+  - Added CLI flags `--pipeline` and `--start-jitter` to [`main.py`](file:///C:/Users/User/PycharmProjects/zioX/main.py).
+  - Created [`scripts/run_pipeline.ps1`](file:///C:/Users/User/PycharmProjects/zioX/scripts/run_pipeline.ps1) for local scheduled execution via Windows Task Scheduler.
+  - Created [`.github/workflows/ziox_cron.yml`](file:///C:/Users/User/PycharmProjects/zioX/.github/workflows/ziox_cron.yml) for automated serverless execution on GitHub Actions.
+  - Added 4 dedicated unit tests in [`tests/test_scheduler.py`](file:///C:/Users/User/PycharmProjects/zioX/tests/test_scheduler.py) (4/4 passing). Full test suite: 41/41 passing.
+
+---
+
+### Step 11: Cloud Persistence via Turso / libSQL Database Adapter (Completed)
+* **Goal**: Equip `database/repository.py` with dual-engine capability: seamless local `sqlite3` fallback when working offline, and remote HTTPS/libSQL connection when `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` are configured. This enables completely stateless serverless execution on GitHub Actions without committing `.db` binaries to Git.
+* **Plan File**: [`docs/plans/step_11_turso_cloud_db.md`](file:///C:/Users/User/PycharmProjects/zioX/docs/plans/step_11_turso_cloud_db.md)
+* **Result**:
+  - Added `libsql-client>=0.3.0` dependency to [`pyproject.toml`](file:///C:/Users/User/PycharmProjects/zioX/pyproject.toml).
+  - Added `turso_database_url` and `turso_auth_token` fields to [`config/settings.py`](file:///C:/Users/User/PycharmProjects/zioX/config/settings.py).
+  - Implemented dual-engine in [`database/repository.py`](file:///C:/Users/User/PycharmProjects/zioX/database/repository.py) supporting both local SQLite and remote Turso libSQL execution.
+  - Updated [`main.py`](file:///C:/Users/User/PycharmProjects/zioX/main.py) to pass Turso credentials to `Repository` and display target in `--status`.
+  - Updated [`.github/workflows/ziox_cron.yml`](file:///C:/Users/User/PycharmProjects/zioX/.github/workflows/ziox_cron.yml) to inject `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` secrets.
+  - Created 3 unit tests in [`tests/test_turso_adapter.py`](file:///C:/Users/User/PycharmProjects/zioX/tests/test_turso_adapter.py) (3/3 passing). Full test suite: 44/44 passing.

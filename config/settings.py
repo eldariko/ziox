@@ -28,7 +28,11 @@ class Settings(BaseSettings):
     # Bot Execution Mode
     dry_run: bool = Field(default=True, description="When True, no live posts are sent to X")
     twitter_provider: str = Field(default="mock", description="'mock', 'zernio', or 'twikit'")
-    database_path: str = Field(default="ziox.db", description="Path to SQLite database file")
+    database_path: str = Field(default="ziox.db", description="Path to local SQLite database file")
+
+    # Turso Cloud SQLite Configuration
+    turso_database_url: str = Field(default="", description="Turso database URL (e.g. libsql://... or https://...)")
+    turso_auth_token: str = Field(default="", description="Turso auth token for remote database connection")
 
     # Scoring & Quotas
     virality_threshold: float = Field(default=5.0, description="Minimum virality score to trigger evaluation")
@@ -40,6 +44,7 @@ class Settings(BaseSettings):
     min_reply_delay_seconds: float = Field(default=35.0, description="Minimum human hesitation pause in seconds")
     max_reply_delay_seconds: float = Field(default=85.0, description="Maximum human hesitation pause in seconds")
     link_cooldown_minutes: int = Field(default=60, description="Minutes to wait before reusing the exact same proof URL")
+    start_jitter_max_minutes: float = Field(default=15.0, description="Maximum random start delay in minutes for external schedulers")
 
     # Keywords for X search (English and Arabic)
     search_keywords: List[str] = Field(

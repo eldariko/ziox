@@ -50,7 +50,8 @@ def show_status(repo: Repository, settings) -> None:
     print("\n" + "=" * 55)
     print("                zioX STATUS REPORT")
     print("=" * 55)
-    print(f"Database Path        : {settings.database_path}")
+    db_target = f"Turso Cloud ({settings.turso_database_url})" if settings.turso_database_url else f"Local SQLite ({settings.database_path})"
+    print(f"Database Target      : {db_target}")
     print(f"Twitter Provider     : {settings.twitter_provider}")
     print(f"Dry Run Mode         : {settings.dry_run}")
     print(f"Monthly Reply Usage  : {monthly_count} / {settings.monthly_max_replies}")
@@ -130,6 +131,17 @@ def main():
         help="Target and process a specific tweet by URL or ID end-to-end"
     )
     parser.add_argument(
+        "--pipeline",
+        action="store_true",
+        help="Execute autonomous unified pipeline: Discovery Radar -> Queue Processing -> Stealth Dispatch"
+    )
+    parser.add_argument(
+        "--start-jitter",
+        type=float,
+        default=None,
+        help="Maximum random start delay in minutes before executing pipeline (overrides setting)"
+    )
+    parser.add_argument(
         "--run-once",
         action="store_true",
         help="Execute a single monitoring, verification, and engagement cycle"
@@ -167,7 +179,11 @@ def main():
     if args.threshold is not None:
         settings.virality_threshold = args.threshold
 
-    repo = Repository(settings.database_path)
+    repo = Repository(
+        db_path=settings.database_path,
+        turso_url=settings.turso_database_url,
+        turso_auth_token=settings.turso_auth_token
+    )
 
     if args.status:
         show_status(repo, settings)
@@ -244,6 +260,32 @@ def main():
         provider=provider,
         grounding_engine=grounding
     )
+
+    # Unified Pipeline Execution (External Scheduler / Cron Target)
+    if args.pipeline:
+        radar = DiscoveryRadar(repo)
+        mode_label = "Interactive" if args.interactive else "Autonomous"
+        print(f"\n[zioX Pipeline] Starting unified pipeline (Mode: {mode_label}, Provider: {settings.twitter_provider}, Dry Run: {settings.dry_run})...")
+        report = orchestrator.run_full_pipeline(
+            radar=radar,
+            start_jitter_minutes=args.start_jitter,
+            interactive=args.interactive
+        )
+        print(f"[zioX Pipeline] Pipeline finished with status: {report['status']}")
+        print(f"                Discovered tweets: {report.get('discovered_count', 0)}")
+        print(f"                Tweets processed : {report.get('processed', 0)}")
+        print(f"                Replies sent     : {report.get('replies_sent', 0)}")
+        if report.get("details"):
+            print(f"                Details          : {report['details']}")
+        if report.get("results"):
+            print("\nGenerated Responses:")
+            for item in report["results"]:
+                print(f" - Tweet ID: {item['tweet_id']} (@{item['author']}) | Score: {item['virality_score']}")
+                print(f"   Claim: {item['claim']}")
+                print(f"   Reply: {item['reply']}")
+                print(f"   Published: {item['published']}\n")
+        show_status(repo, settings)
+        return
 
     # Process queue or targeted tweet
     if args.process_queue or args.process_tweet:

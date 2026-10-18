@@ -1,0 +1,57 @@
+name: zioX Scheduled Pipeline
+
+on:
+  schedule:
+    # Run every 4 hours (at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      live_mode:
+        description: 'Publish live to X (unchecked = dry-run)'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ziox-pipeline
+  cancel-in-progress: false
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run zioX Unified Pipeline
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
+          GEMINI_SEARCH_GROUNDING: ${{ secrets.GEMINI_SEARCH_GROUNDING || 'false' }}
+          X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
+          X_CT0: ${{ secrets.X_CT0 }}
+          X_COOKIES_FILE: ${{ secrets.X_COOKIES_FILE || 'cookies.json' }}
+          TWITTER_PROVIDER: ${{ secrets.TWITTER_PROVIDER || 'mock' }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          EXTRA_FLAGS=""
+          if [ "${{ inputs.live_mode }}" = "true" ]; then
+            EXTRA_FLAGS="--live"
+          fi
+          # Run unified pipeline with start jitter (up to 20 minutes random pause)
+          python main.py --pipeline --start-jitter 20 $EXTRA_FLAGS

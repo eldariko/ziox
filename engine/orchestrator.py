@@ -526,3 +526,85 @@ class BotOrchestrator:
             "replies_sent": replies_sent,
             "results": results
         }
+
+    def run_full_pipeline(
+        self,
+        radar: Any,
+        start_jitter_minutes: Optional[float] = None,
+        interactive: bool = False,
+        limit_queue: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Executes an end-to-end autonomous pipeline run designed for external schedulers:
+        1. Applies optional randomized start jitter delay.
+        2. Verifies monthly reply quota ceiling.
+        3. Runs Discovery Radar to search keywords and enqueue viral posts.
+        4. Processes pending queue up to per-cycle stealth caps with Gaussian delays.
+        5. Returns full run execution metrics.
+        """
+        # 1. Start Jitter Calculation
+        max_jitter = self.settings.start_jitter_max_minutes if start_jitter_minutes is None else start_jitter_minutes
+        if max_jitter > 0:
+            jitter_sec = random.uniform(0.0, max_jitter * 60.0)
+            if self.settings.dry_run:
+                logger.info(f"[START JITTER] Simulated {jitter_sec:.1f}s start delay (skipped in dry-run).")
+            else:
+                logger.info(f"[START JITTER] Pausing {jitter_sec:.1f}s before starting pipeline to randomize access cadence...")
+                time.sleep(jitter_sec)
+
+        # 2. Check Monthly Quota Hard-Stop
+        current_monthly_count = self.repo.get_monthly_reply_count()
+        if current_monthly_count >= self.settings.monthly_max_replies:
+            msg = f"Monthly reply ceiling reached ({current_monthly_count}/{self.settings.monthly_max_replies}). Pipeline halted."
+            logger.warning(msg)
+            self.repo.log_run(0, 0, "ABORTED_QUOTA_EXCEEDED", msg)
+            return {
+                "status": "QUOTA_EXCEEDED",
+                "discovered_count": 0,
+                "discovered_tweets": [],
+                "processed": 0,
+                "replies_sent": 0,
+                "details": msg,
+                "results": []
+            }
+
+        # 3. Discovery Radar Ingestion
+        discovered = []
+        try:
+            logger.info(f"[PIPELINE] Running Discovery Radar across {len(self.settings.search_keywords)} keywords...")
+            discovered = radar.scan_keywords(
+                provider=self.provider,
+                keywords=self.settings.search_keywords,
+                limit_per_keyword=5,
+                min_virality_score=self.settings.virality_threshold
+            )
+            logger.info(f"[PIPELINE] Radar discovered and enqueued {len(discovered)} candidate tweets.")
+        except Exception as e:
+            err_msg = f"Discovery Radar failed: {e}"
+            logger.error(err_msg)
+            self.repo.log_run(0, 0, "RADAR_ERROR", err_msg)
+            return {
+                "status": "RADAR_ERROR",
+                "discovered_count": 0,
+                "discovered_tweets": [],
+                "processed": 0,
+                "replies_sent": 0,
+                "details": err_msg,
+                "results": []
+            }
+
+        # 4. Queue Responder Dispatch
+        logger.info(f"[PIPELINE] Processing queue (max cycle replies: {self.settings.max_replies_per_cycle})...")
+        queue_report = self.process_queue(
+            interactive=interactive,
+            limit=limit_queue
+        )
+
+        return {
+            "status": queue_report.get("status", "SUCCESS"),
+            "discovered_count": len(discovered),
+            "discovered_tweets": discovered,
+            "processed": queue_report.get("processed", 0),
+            "replies_sent": queue_report.get("replies_sent", 0),
+            "results": queue_report.get("results", [])
+        }
