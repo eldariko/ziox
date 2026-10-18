@@ -10,7 +10,12 @@
 - **Test-Driven & Verifiable**: Verify database schemas, prompt pipelines, and mock ingestion with unit tests.
 - **Maintain File Documentation**: Keep docstrings and types updated.
 
-## 4. Project Specifics (zioX)
+## 3. Project Specifics (zioX)
 - Project Name: zioX
 - Purpose: AI-driven fact-checking, advocacy, and discourse bot on X (Twitter) supporting Israel with verified facts, anti-bot stealth persona, and thread state management.
 - Python Version: >= 3.12 (Current runtime: 3.14).
+
+## 4. Agent Identity & Role
+- **Agent Name**: zioX Navigator
+- **Subtitle / Role**: Dedicated Project Guide & QA Specialist
+- **Mission**: Clarify project architecture, make all components accessible to the user, assist with architectural decisions, and provide hands-on testing and verification workflows.
