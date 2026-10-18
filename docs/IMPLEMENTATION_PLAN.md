@@ -43,8 +43,8 @@ flowchart LR
 | **Step 8A** | **Decoupled Discovery Radar & Tweet Queue** | **COMPLETED** | `engine/radar.py`, `database/schema.py`, `database/repository.py`, `main.py` |
 | **Step 8B** | **Targeted Action & Reply Dispatcher** | **COMPLETED** | `engine/orchestrator.py`, `providers/twikit_provider.py`, `main.py` |
 | **Step 8C** | **Verified Link Validator & Live Citation Engine** | **COMPLETED** | `docs/plans/step_08c_link_validator.md`, `engine/link_validator.py`, `engine/humanizer.py`, `assets/proofs/whitelisted_sources.json` |
-| **Step 9** | **Anti-Ban Stealth Pacing & Rate Limiting** | **READY FOR REVIEW** | `docs/plans/step_09_stealth_pacing.md`, `config/settings.py`, `engine/orchestrator.py` |
-| **Step 10** | **Autonomous Scheduler & Safety Ceiling** | **PENDING** | `docs/plans/step_10_scheduler.md`, `scheduler.py` |
+| **Step 9** | **Anti-Ban Stealth Pacing & Rate Limiting** | **COMPLETED** | `docs/plans/step_09_stealth_pacing.md`, `config/settings.py`, `engine/orchestrator.py`, `database/repository.py`, `tests/test_stealth.py` |
+| **Step 10** | **External Scheduler & Unified Pipeline** | **READY FOR REVIEW** | `docs/plans/step_10_scheduler.md`, `config/settings.py`, `engine/orchestrator.py`, `main.py`, `scripts/run_pipeline.ps1`, `.github/workflows/ziox_cron.yml`, `tests/test_scheduler.py` |
 
 ---
 
@@ -115,14 +115,18 @@ flowchart LR
 
 ---
 
-### Step 9: Anti-Ban Stealth Pacing & Rate Limiting (Ready for Review)
+### Step 9: Anti-Ban Stealth Pacing & Rate Limiting (Completed)
 * **Goal**: Protect accounts from X's anti-bot detection during automated batch runs by introducing randomized human Gaussian typing delays (35–85s), per-cycle burst caps (max 2–3 replies/cycle), and link frequency throttling.
 * **Plan File**: [`docs/plans/step_09_stealth_pacing.md`](file:///C:/Users/User/PycharmProjects/zioX/docs/plans/step_09_stealth_pacing.md)
-* **Files**: `config/settings.py`, `engine/orchestrator.py`, `tests/test_stealth.py`
+* **Result**:
+  - Added stealth pacing & rate limit settings in [`config/settings.py`](file:///C:/Users/User/PycharmProjects/zioX/config/settings.py) (`max_replies_per_cycle`, `min_reply_delay_seconds`, `max_reply_delay_seconds`, `link_cooldown_minutes`).
+  - Added link frequency cooldown tracking in [`database/repository.py`](file:///C:/Users/User/PycharmProjects/zioX/database/repository.py) via `is_link_recently_posted()`.
+  - Implemented Gaussian jitter delay calculation `calculate_gaussian_jitter()` and delay enforcement in [`engine/orchestrator.py`](file:///C:/Users/User/PycharmProjects/zioX/engine/orchestrator.py).
+  - Enforced per-cycle caps on both `run_cycle` and `process_queue`, ensuring queued candidate tweets stay in `DISCOVERED` state for future cycles.
+  - Created 6 dedicated unit tests in [`tests/test_stealth.py`](file:///C:/Users/User/PycharmProjects/zioX/tests/test_stealth.py) (6/6 passing). Full test suite: 37/37 passing.
 
 ---
 
-### Step 10: Autonomous Scheduler & Safety Ceiling (Pending)
-* **Goal**: Continuous autonomous scheduling daemon with monthly quota hard-stops and execution auditing.
-* **Plan File**: `docs/plans/step_10_scheduler.md`
-* **Files**: `scheduler.py`
+### Step 10: External Scheduler & Unified Pipeline Architecture (Ready for Review)
+* **Goal**: Transition from a costly, fragile 24/7 daemon loop to a serverless, external scheduler cron architecture. Implement single-command pipeline (--pipeline) with human start jitter, monthly ceiling hard-stops, and execution templates for local Windows Task Scheduler and GitHub Actions.
+* **Plan File**: [docs/plans/step_10_scheduler.md](file:///C:/Users/User/PycharmProjects/zioX/docs/plans/step_10_scheduler.md)

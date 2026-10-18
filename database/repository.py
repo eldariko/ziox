@@ -141,11 +141,39 @@ class Repository:
             conn.commit()
             return cursor.lastrowid
 
+    def is_link_recently_posted(
+        self,
+        link: str,
+        cooldown_minutes: int = 60,
+        include_dry_run: bool = True
+    ) -> bool:
+        """Check if a URL has already been attached to a published reply within the cooldown period."""
+        if not link:
+            return False
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if include_dry_run:
+                query = """
+                    SELECT COUNT(*) as count FROM processed_tweets
+                    WHERE link_attached = ?
+                    AND (was_published = 1 OR status = 'PROCESSED_DRY_RUN')
+                    AND created_at >= datetime('now', '-' || ? || ' minutes')
+                """
+            else:
+                query = """
+                    SELECT COUNT(*) as count FROM processed_tweets
+                    WHERE link_attached = ?
+                    AND was_published = 1
+                    AND created_at >= datetime('now', '-' || ? || ' minutes')
+                """
+            cursor.execute(query, (link, cooldown_minutes))
+            row = cursor.fetchone()
+            return (row["count"] > 0) if row else False
+
     def get_monthly_reply_count(self) -> int:
         """Count replies published in the current calendar month."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            # SQLite strftime for current year and month
             cursor.execute(
                 """
                 SELECT COUNT(*) as count FROM processed_tweets

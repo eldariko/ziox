@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     monthly_max_replies: int = Field(default=30, description="Maximum total replies per month")
     max_thread_turns: int = Field(default=2, description="Maximum turns per thread before disengaging")
 
+    # Anti-Ban Stealth Pacing & Rate Limits
+    max_replies_per_cycle: int = Field(default=2, description="Maximum replies dispatched per single scan or queue run")
+    min_reply_delay_seconds: float = Field(default=35.0, description="Minimum human hesitation pause in seconds")
+    max_reply_delay_seconds: float = Field(default=85.0, description="Maximum human hesitation pause in seconds")
+    link_cooldown_minutes: int = Field(default=60, description="Minutes to wait before reusing the exact same proof URL")
+
     # Keywords for X search (English and Arabic)
     search_keywords: List[str] = Field(
         default=[
