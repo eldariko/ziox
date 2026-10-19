@@ -133,7 +133,7 @@ class DiscoveryRadar:
                             "keyword": keyword
                         })
             except Exception as e:
-                logger.error(f"Radar failed scanning keyword '{keyword}': {e}")
+                logger.error(f"Radar failed scanning keyword '{keyword}': {e}", exc_info=True)
                 continue
 
         return enqueued_items

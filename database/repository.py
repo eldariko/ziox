@@ -1,18 +1,14 @@
 """Database repository providing data access and persistence for zioX."""
 
+import atexit
 import logging
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from database.schema import INIT_STATEMENTS
+from database.turso_client import TursoClient
 
 logger = logging.getLogger(__name__)
-
-try:
-    import libsql_client
-    HAS_LIBSQL = True
-except ImportError:
-    HAS_LIBSQL = False
 
 
 class Repository:
@@ -20,7 +16,7 @@ class Repository:
     Manages database queries for threads, tweets, and logs.
     Supports dual-mode engine:
     - Local Mode (default): standard Python sqlite3 with `db_path`.
-    - Cloud Mode (Turso / libSQL): remote HTTP/libSQL connection via `turso_url` & `turso_auth_token`.
+    - Cloud Mode (Turso / libSQL): remote HTTP connection via native TursoClient (/v2/pipeline).
     """
 
     def __init__(
@@ -33,30 +29,34 @@ class Repository:
         self.turso_url = turso_url.strip() if turso_url else ""
         self.turso_auth_token = turso_auth_token.strip() if turso_auth_token else ""
         self.is_remote = bool(self.turso_url)
-        self._remote_client = None
+        self._remote_client: Optional[TursoClient] = None
 
         if self.is_remote:
-            if not HAS_LIBSQL:
-                raise ImportError("libsql-client is required to connect to Turso cloud database.")
-
-            # Modern Turso AWS endpoints reject legacy hrana2 WebSocket handshake (400 Bad Request).
-            # Convert libsql:// and wss:// schemes to https:// to use the reliable stateless HTTP transport.
-            if self.turso_url.startswith("libsql://"):
-                self.turso_url = "https://" + self.turso_url[len("libsql://"):]
-            elif self.turso_url.startswith("wss://"):
-                self.turso_url = "https://" + self.turso_url[len("wss://"):]
-            elif self.turso_url.startswith("ws://"):
-                self.turso_url = "http://" + self.turso_url[len("ws://"):]
-
             logger.info(f"[REPOSITORY] Connecting to Turso Cloud SQLite endpoint: {self.turso_url}")
-            self._remote_client = libsql_client.create_client_sync(
+            self._remote_client = TursoClient(
                 url=self.turso_url,
                 auth_token=self.turso_auth_token
             )
+            atexit.register(self.close)
         else:
             logger.info(f"[REPOSITORY] Using local SQLite database at: {self.db_path}")
 
         self._init_db()
+
+    def close(self) -> None:
+        """Close database connections and cleanup open sessions."""
+        if self._remote_client is not None:
+            try:
+                self._remote_client.close()
+            except Exception:
+                pass
+            self._remote_client = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
     def _get_connection(self) -> sqlite3.Connection:
         """Local sqlite3 connection fallback."""
@@ -104,8 +104,7 @@ class Repository:
                     cursor.execute("ALTER TABLE processed_tweets ADD COLUMN status TEXT DEFAULT 'PROCESSED'")
                 conn.commit()
 
-    # --- Tweet Operations ---
-
+    # --- Tweet Operations ---\n
     def is_tweet_processed(self, tweet_id: str) -> bool:
         """Check if a tweet ID has already been recorded."""
         query = "SELECT 1 FROM processed_tweets WHERE tweet_id = ?"
@@ -284,8 +283,7 @@ class Repository:
                 row = cursor.fetchone()
                 return row["count"] if row else 0
 
-    # --- Thread Operations ---
-
+    # --- Thread Operations ---\n
     def get_thread(self, thread_root_id: str) -> Optional[Dict[str, Any]]:
         """Fetch thread state by root ID."""
         query = "SELECT * FROM threads WHERE thread_root_id = ?"
@@ -374,8 +372,7 @@ class Repository:
                 cursor.execute(query, tuple(params))
                 conn.commit()
 
-    # --- Run Audit Logs ---
-
+    # --- Run Audit Logs ---\n
     def log_run(
         self,
         tweets_scanned: int,
