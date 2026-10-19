@@ -160,3 +160,30 @@ def test_repository_remote_mode_crud_operations():
         assert thread["thread_root_id"] == "root_1"
 
         repo.close()
+
+
+def test_repository_remote_migration_removes_foreign_key():
+    """Verify that remote Turso initialization detects and migrates legacy FK constraints."""
+    mock_client = MagicMock()
+
+    def mock_execute(query, params=None):
+        if "PRAGMA foreign_key_list" in query:
+            return MagicMock(rows=[{"from": "parent_tweet_id", "to": "tweet_id"}])
+        elif "PRAGMA table_info" in query:
+            return MagicMock(rows=[{"name": "id"}, {"name": "tweet_id"}, {"name": "parent_tweet_id"}, {"name": "status"}])
+        return MagicMock(rows=[], rows_affected=1, last_insert_rowid=1)
+
+    mock_client.execute.side_effect = mock_execute
+
+    with patch("database.repository.TursoClient", return_value=mock_client):
+        repo = Repository(
+            turso_url="libsql://mock-cloud.turso.io",
+            turso_auth_token="secret"
+        )
+        repo.close()
+
+    executed_queries = [call.args[0] for call in mock_client.execute.call_args_list]
+    assert any("DROP TABLE IF EXISTS processed_tweets_migration_temp" in q for q in executed_queries)
+    assert any("INSERT INTO processed_tweets_migration_temp" in q for q in executed_queries)
+    assert any("DROP TABLE processed_tweets" in q for q in executed_queries)
+    assert any("RENAME TO processed_tweets" in q for q in executed_queries)

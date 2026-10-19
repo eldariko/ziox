@@ -25,8 +25,7 @@ CREATE TABLE IF NOT EXISTS processed_tweets (
     was_published BOOLEAN DEFAULT 0,
     virality_score REAL DEFAULT 0,
     status TEXT DEFAULT 'PROCESSED', -- 'DISCOVERED', 'PROCESSED', 'APPROVED', 'PUBLISHED', 'SKIPPED'
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(parent_tweet_id) REFERENCES processed_tweets(tweet_id)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
 

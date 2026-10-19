@@ -5,7 +5,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
-from database.schema import INIT_STATEMENTS
+from database.schema import INIT_STATEMENTS, CREATE_PROCESSED_TWEETS_TABLE
 from database.turso_client import TursoClient
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,7 @@ class Repository:
         """Local sqlite3 connection fallback."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     def _execute(self, query: str, params: Optional[List[Any]] = None) -> Any:
@@ -81,7 +82,7 @@ class Repository:
                 return cursor
 
     def _init_db(self) -> None:
-        """Create tables if they do not exist, and migrate columns."""
+        """Create tables if they do not exist, and migrate columns/constraints."""
         if self.is_remote:
             for stmt in INIT_STATEMENTS:
                 self._remote_client.execute(stmt)
@@ -92,6 +93,7 @@ class Repository:
                 self._remote_client.execute(
                     "ALTER TABLE processed_tweets ADD COLUMN status TEXT DEFAULT 'PROCESSED'"
                 )
+            self._migrate_remove_parent_tweet_fk_remote()
         else:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -103,8 +105,81 @@ class Repository:
                 if "status" not in columns:
                     cursor.execute("ALTER TABLE processed_tweets ADD COLUMN status TEXT DEFAULT 'PROCESSED'")
                 conn.commit()
+                self._migrate_remove_parent_tweet_fk_local(conn)
 
-    # --- Tweet Operations ---\n
+    def _migrate_remove_parent_tweet_fk_remote(self) -> None:
+        """Remove foreign key constraint on parent_tweet_id in remote Turso database if present."""
+        try:
+            fk_res = self._remote_client.execute("PRAGMA foreign_key_list(processed_tweets)")
+        except Exception as e:
+            logger.warning(f"[MIGRATION] Failed checking foreign key list on remote DB: {e}")
+            return
+
+        has_fk = False
+        for row in fk_res.rows:
+            from_col = row.get("from") if isinstance(row, dict) else (row[3] if len(row) > 3 else None)
+            if from_col == "parent_tweet_id":
+                has_fk = True
+                break
+
+        if not has_fk:
+            return
+
+        logger.info("[MIGRATION] Migrating remote processed_tweets table to remove foreign key constraint on parent_tweet_id...")
+        self._remote_client.execute("DROP TABLE IF EXISTS processed_tweets_migration_temp")
+        temp_create = CREATE_PROCESSED_TWEETS_TABLE.replace("processed_tweets", "processed_tweets_migration_temp")
+        self._remote_client.execute(temp_create)
+
+        info_res = self._remote_client.execute("PRAGMA table_info(processed_tweets)")
+        existing_cols = [row["name"] for row in info_res.rows]
+        temp_info = self._remote_client.execute("PRAGMA table_info(processed_tweets_migration_temp)")
+        target_cols = [row["name"] for row in temp_info.rows]
+        common_cols = [col for col in existing_cols if col in target_cols]
+        cols_str = ", ".join(common_cols)
+
+        self._remote_client.execute(
+            f"INSERT INTO processed_tweets_migration_temp ({cols_str}) SELECT {cols_str} FROM processed_tweets"
+        )
+        self._remote_client.execute("DROP TABLE processed_tweets")
+        self._remote_client.execute("ALTER TABLE processed_tweets_migration_temp RENAME TO processed_tweets")
+        logger.info("[MIGRATION] Successfully removed foreign key constraint from remote processed_tweets.")
+
+    def _migrate_remove_parent_tweet_fk_local(self, conn: sqlite3.Connection) -> None:
+        """Remove foreign key constraint on parent_tweet_id in local SQLite database if present."""
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA foreign_key_list(processed_tweets)")
+        fks = cursor.fetchall()
+        has_parent_fk = any(
+            (row["from"] if isinstance(row, sqlite3.Row) else row[3]) == "parent_tweet_id"
+            for row in fks
+        )
+        if not has_parent_fk:
+            return
+
+        logger.info("[MIGRATION] Migrating local processed_tweets table to remove foreign key constraint on parent_tweet_id...")
+        cursor.execute("PRAGMA foreign_keys = OFF")
+        cursor.execute("DROP TABLE IF EXISTS processed_tweets_migration_temp")
+        temp_create = CREATE_PROCESSED_TWEETS_TABLE.replace("processed_tweets", "processed_tweets_migration_temp")
+        cursor.execute(temp_create)
+
+        cursor.execute("PRAGMA table_info(processed_tweets)")
+        existing_cols = [col["name"] for col in cursor.fetchall()]
+        cursor.execute("PRAGMA table_info(processed_tweets_migration_temp)")
+        target_cols = [col["name"] for col in cursor.fetchall()]
+        common_cols = [col for col in existing_cols if col in target_cols]
+        cols_str = ", ".join(common_cols)
+
+        cursor.execute(
+            f"INSERT INTO processed_tweets_migration_temp ({cols_str}) SELECT {cols_str} FROM processed_tweets"
+        )
+        cursor.execute("DROP TABLE processed_tweets")
+        cursor.execute("ALTER TABLE processed_tweets_migration_temp RENAME TO processed_tweets")
+        conn.commit()
+        cursor.execute("PRAGMA foreign_keys = ON")
+        logger.info("[MIGRATION] Successfully removed foreign key constraint from local processed_tweets.")
+
+    # --- Tweet Operations ---
+
     def is_tweet_processed(self, tweet_id: str) -> bool:
         """Check if a tweet ID has already been recorded."""
         query = "SELECT 1 FROM processed_tweets WHERE tweet_id = ?"
@@ -283,7 +358,8 @@ class Repository:
                 row = cursor.fetchone()
                 return row["count"] if row else 0
 
-    # --- Thread Operations ---\n
+    # --- Thread Operations ---
+
     def get_thread(self, thread_root_id: str) -> Optional[Dict[str, Any]]:
         """Fetch thread state by root ID."""
         query = "SELECT * FROM threads WHERE thread_root_id = ?"
@@ -372,7 +448,8 @@ class Repository:
                 cursor.execute(query, tuple(params))
                 conn.commit()
 
-    # --- Run Audit Logs ---\n
+    # --- Run Audit Logs ---
+
     def log_run(
         self,
         tweets_scanned: int,
