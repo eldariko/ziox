@@ -30,7 +30,7 @@ def test_repository_local_mode_by_default(tmp_path):
 
 
 def test_repository_remote_mode_with_turso_client(tmp_path):
-    """Verify Repository initializes libsql_client when turso_url is provided."""
+    """Verify Repository initializes libsql_client when turso_url is provided and normalizes URL to https."""
     mock_client = MagicMock()
     # Mock schema table check
     mock_client.execute.return_value = MagicMock(rows=[{"name": "status"}], rows_affected=1, last_insert_rowid=1)
@@ -44,8 +44,9 @@ def test_repository_remote_mode_with_turso_client(tmp_path):
 
         assert repo.is_remote is True
         assert repo._remote_client == mock_client
+        # Verifies that libsql:// is converted to https:// for HTTP transport
         mock_create.assert_called_once_with(
-            url="libsql://test-db.turso.io",
+            url="https://test-db.turso.io",
             auth_token="test_token_123"
         )
 

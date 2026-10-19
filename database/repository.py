@@ -38,6 +38,16 @@ class Repository:
         if self.is_remote:
             if not HAS_LIBSQL:
                 raise ImportError("libsql-client is required to connect to Turso cloud database.")
+
+            # Modern Turso AWS endpoints reject legacy hrana2 WebSocket handshake (400 Bad Request).
+            # Convert libsql:// and wss:// schemes to https:// to use the reliable stateless HTTP transport.
+            if self.turso_url.startswith("libsql://"):
+                self.turso_url = "https://" + self.turso_url[len("libsql://"):]
+            elif self.turso_url.startswith("wss://"):
+                self.turso_url = "https://" + self.turso_url[len("wss://"):]
+            elif self.turso_url.startswith("ws://"):
+                self.turso_url = "http://" + self.turso_url[len("ws://"):]
+
             logger.info(f"[REPOSITORY] Connecting to Turso Cloud SQLite endpoint: {self.turso_url}")
             self._remote_client = libsql_client.create_client_sync(
                 url=self.turso_url,
