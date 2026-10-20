@@ -1,31 +1,32 @@
 # zioX: Step-by-Step Collaborative Implementation Plan
 
-> **Note**: This file serves as the single source of truth for our build roadmap.
-> Every step follows AI-assisted engineering design principles: explicit requirements, architecture design, verifiable test criteria, and user approval gates before code execution.
+> [!NOTE]
+> **OpenSpec Migration Completed**:
+> The project build specifications for Steps 1–11 have been successfully migrated to **OpenSpec** under [`openspec/specs/`](file:///C:/Users/User/PycharmProjects/zioX/openspec/specs).
+> All future features and refactors will be proposed, designed, and applied using standard OpenSpec changes (`openspec new change`, `openspec propose`, `openspec apply`).
+> This file is retained as an authoritative historical record of the initial foundational build.
 
 ---
 
-## AI-Assisted Design & Engineering Protocol (Mandatory Workflow)
-
-To guarantee that everything requested is properly designed, implemented, and verified without regressions, every upcoming step will follow this strict lifecycle:
+## AI-Assisted Design & Engineering Protocol (OpenSpec Lifecycle)
 
 ```mermaid
 flowchart LR
-    StepPlan["1. Detailed Step Plan\n(docs/plans/step_X.md)"] --> UserReview["2. User Review\n& Approval Gate"]
-    UserReview --> TDD["3. Test-Driven Build\n& Unit Tests"]
-    TDD --> Verification["4. Automated Verification\n(Pytest + Live Smoke)"]
-    Verification --> MasterUpdate["5. Master Roadmap\nCheck-off"]
+    Propose["1. OpenSpec Propose\n(proposal, specs, design, tasks)"] --> Review["2. Review & Approval Gate"]
+    Review --> Apply["3. OpenSpec Apply\n(TDD + Implementation)"]
+    Apply --> Verify["4. Verification\n(Pytest + Live Smoke)"]
+    Verify --> Archive["5. OpenSpec Archive\n(Sync Specs & Retain History)"]
 ```
 
-1. **Dedicated Step Plan Document**:
-   - For every step, a dedicated design and verification file will be created in `docs/plans/step_XX_<name>.md`.
-   - The plan details: Architecture changes, exact file diffs, edge cases, human-in-the-loop UX, anti-ban protections, and verification commands.
+1. **Structured OpenSpec Changes**:
+   - For every new feature or change, a dedicated OpenSpec proposal is created in `openspec/changes/<change-name>/`.
+   - Artifacts include `proposal.md`, `specs/<capability>/spec.md` (delta specs), `design.md`, and `tasks.md`.
 2. **Review & Approval Gate**:
-   - No code is committed until you inspect and approve the step design.
+   - Implementation begins only after inspecting and approving the OpenSpec proposal and tasks.
 3. **Safe Simulation by Default**:
    - All tests and executions default to `DRY_RUN=True` to safeguard accounts and API quota.
 4. **Verifiable Proof of Delivery**:
-   - Every completed step must pass automated pytest suites and a 30-second live verification command before moving forward.
+   - Every completed step must pass automated pytest suites and live verification commands before archiving.
 
 ---
 
@@ -46,6 +47,7 @@ flowchart LR
 | **Step 9** | **Anti-Ban Stealth Pacing & Rate Limiting** | **COMPLETED** | `docs/plans/step_09_stealth_pacing.md`, `config/settings.py`, `engine/orchestrator.py`, `database/repository.py`, `tests/test_stealth.py` |
 | **Step 10** | **External Scheduler & Unified Pipeline** | **COMPLETED** | `docs/plans/step_10_scheduler.md`, `config/settings.py`, `engine/orchestrator.py`, `main.py`, `scripts/run_pipeline.ps1`, `.github/workflows/ziox_cron.yml`, `tests/test_scheduler.py` |
 | **Step 11** | **Cloud Persistence via Turso / libSQL Adapter** | **COMPLETED** | `docs/plans/step_11_turso_cloud_db.md`, `pyproject.toml`, `config/settings.py`, `database/repository.py`, `main.py`, `.github/workflows/ziox_cron.yml`, `tests/test_turso_adapter.py` |
+| **Migration** | **Migration to OpenSpec Baseline Specifications** | **COMPLETED** | `openspec/specs/*`, `openspec/config.yaml` |
 
 ---
 
