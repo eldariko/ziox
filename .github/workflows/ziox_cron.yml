@@ -10,7 +10,7 @@ on:
         description: 'Publish live to X (unchecked = dry-run)'
         required: false
         type: boolean
-        default: false
+        default: true
 
 concurrency:
   group: ziox-pipeline
@@ -50,7 +50,8 @@ jobs:
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: |
           EXTRA_FLAGS=""
-          if [ "${{ inputs.live_mode }}" = "true" ]; then
+          # Live mode is enabled by default for scheduled cron runs, and by default for manual triggers unless unchecked
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.live_mode }}" != "false" ]; then
             EXTRA_FLAGS="--live"
           fi
           # Run unified pipeline with start jitter (up to 20 minutes random pause)
