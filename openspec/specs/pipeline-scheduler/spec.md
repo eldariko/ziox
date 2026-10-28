@@ -29,3 +29,10 @@ The system MUST provide standalone automation entry points (e.g., PowerShell pip
 #### Scenario: Scheduled cycle execution
 - **WHEN** triggered by a cron job or external task runner
 - **THEN** the pipeline runs an automated cycle, records action logs, and exits with a zero status code.
+
+### Requirement: Telegram Review Channel Integration
+The system SHALL support routing interactive human-in-the-loop review alerts to Telegram during automated or scheduled pipeline executions.
+
+#### Scenario: Scheduled pipeline sends Telegram alerts
+- **WHEN** the pipeline runs with Telegram notifications configured
+- **THEN** high-momentum grounded candidates are dispatched to Telegram with one-tap X Web Intent URLs instead of prompting on CLI standard input.

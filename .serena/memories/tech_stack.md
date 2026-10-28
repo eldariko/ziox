@@ -5,7 +5,8 @@
 - **Core Libraries**:
   - google-genai: LLM grounding and response generation (Gemini).
   - pydantic & pydantic-settings: Structured configuration, validation, and schemas.
-  - httpx: Async HTTP client for external APIs / Turso database calls.
-  - 	wikit: Twitter/X API provider and scraper integration.
+  - httpx: Async HTTP client for external APIs, Telegram Bot API, and Turso calls.
+  - twikit: Twitter/X direct session provider and scraper integration.
   - python-dotenv: Environment configuration loading.
 - **Testing**: pytest (v8.0+).
+- **Automation & Scheduling**: GitHub Actions cron pipeline + Telegram Web Intent Dispatcher.
