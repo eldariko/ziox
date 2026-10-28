@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     x_ct0: str = Field(default="", description="X session ct0 CSRF token cookie")
     x_cookies_file: str = Field(default="cookies.json", description="Path to saved X cookies JSON file")
 
+    # Telegram Review & Web Intent Dispatcher
+    telegram_bot_token: str = Field(default="", description="Telegram Bot API token for review alerts")
+    telegram_chat_id: str = Field(default="", description="Telegram chat ID, channel ID (-100...), or comma-separated list of IDs")
+    telegram_review_enabled: bool = Field(default=False, description="When True, send review cards to Telegram")
+
     # Bot Execution Mode
     dry_run: bool = Field(default=True, description="When True, no live posts are sent to X")
     twitter_provider: str = Field(default="mock", description="'mock', 'zernio', or 'twikit'")

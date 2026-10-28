@@ -12,6 +12,7 @@ from engine.virality import calculate_virality_score, is_viral_candidate, get_vi
 from engine.thread_state import ThreadManager
 from engine.grounding import GroundingEngine
 from engine.humanizer import Humanizer
+from engine.telegram_dispatcher import TelegramDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +38,18 @@ class BotOrchestrator:
         settings: Settings,
         repository: Repository,
         provider: BaseTwitterProvider,
-        grounding_engine: GroundingEngine
+        grounding_engine: GroundingEngine,
+        telegram_dispatcher: Optional[TelegramDispatcher] = None,
     ):
         self.settings = settings
         self.repo = repository
         self.provider = provider
         self.grounding = grounding_engine
         self.thread_manager = ThreadManager(repository, max_turns=settings.max_thread_turns)
+        self.telegram = telegram_dispatcher or TelegramDispatcher(
+            bot_token=settings.telegram_bot_token,
+            chat_ids=settings.telegram_chat_id
+        )
 
     def _apply_stealth_delay(self, reply_count_in_cycle: int) -> float:
         """
@@ -230,10 +236,55 @@ class BotOrchestrator:
             # Ensure final reply does not exceed Twitter 280 limit before dispatching
             final_reply = Humanizer.enforce_length_limit(final_reply, max_length=280)
 
-            # 6. Apply stealth delay before consecutive replies
+            # 6. Telegram Review Dispatch (Asynchronous Human-in-the-Loop)
+            if self.settings.telegram_review_enabled and not interactive:
+                tier = get_virality_tier(tweet)
+                dispatched = self.telegram.dispatch_review(
+                    tweet_id=tweet.id,
+                    author_handle=tweet.author_handle,
+                    tweet_text=tweet.text,
+                    virality_score=virality_score,
+                    virality_tier=tier,
+                    draft_reply=final_reply,
+                    claim_flagged=eval_result.claim_identified,
+                    verified_facts=eval_result.verified_facts,
+                )
+
+                # Save record to DB to guarantee deduplication across subsequent runs
+                self.repo.save_processed_tweet(
+                    tweet_id=tweet.id,
+                    parent_tweet_id=tweet.in_reply_to_tweet_id,
+                    author_handle=tweet.author_handle,
+                    tweet_text=tweet.text,
+                    reply_generated=final_reply,
+                    link_attached=effective_link,
+                    virality_score=virality_score,
+                    was_published=False,
+                    status="DISPATCHED_TELEGRAM" if dispatched else "DISPATCH_FAILED"
+                )
+
+                replies_sent += 1
+                results.append({
+                    "tweet_id": tweet.id,
+                    "author": tweet.author_handle,
+                    "virality_score": virality_score,
+                    "claim": eval_result.claim_identified,
+                    "reply": final_reply,
+                    "published": False,
+                    "telegram_dispatched": dispatched
+                })
+
+                if replies_sent >= self.settings.max_replies_per_cycle:
+                    logger.info(
+                        f"[STEALTH PACING] Reached cycle cap of {self.settings.max_replies_per_cycle} replies. Ending cycle."
+                    )
+                    break
+                continue
+
+            # 7. Apply stealth delay before consecutive replies
             self._apply_stealth_delay(replies_sent)
 
-            # 7. Publish or Dry-Run
+            # 8. Publish or Dry-Run
             was_published = False
             publish_info = None
 
@@ -456,6 +507,49 @@ class BotOrchestrator:
 
             # Ensure final reply does not exceed Twitter 280 limit before dispatching
             final_reply = Humanizer.enforce_length_limit(final_reply, max_length=280)
+
+            # Telegram Review Dispatch in queue processing (Asynchronous Human-in-the-Loop)
+            if self.settings.telegram_review_enabled and not interactive:
+                tier = get_virality_tier(tweet_obj)
+                dispatched = self.telegram.dispatch_review(
+                    tweet_id=tweet_id,
+                    author_handle=author,
+                    tweet_text=text,
+                    virality_score=score,
+                    virality_tier=tier,
+                    draft_reply=final_reply,
+                    claim_flagged=eval_result.claim_identified,
+                    verified_facts=eval_result.verified_facts,
+                )
+
+                self.repo.update_tweet_status(
+                    tweet_id=tweet_id,
+                    status="DISPATCHED_TELEGRAM" if dispatched else "DISPATCH_FAILED",
+                    reply_generated=final_reply,
+                    link_attached=effective_link,
+                    was_published=False
+                )
+
+                replies_sent += 1
+                results.append({
+                    "tweet_id": tweet_id,
+                    "author": author,
+                    "virality_score": score,
+                    "claim": eval_result.claim_identified,
+                    "reply": final_reply,
+                    "published": False,
+                    "telegram_dispatched": dispatched
+                })
+
+                if replies_sent >= self.settings.max_replies_per_cycle:
+                    logger.info(
+                        f"[STEALTH PACING] Reached queue cycle cap of {self.settings.max_replies_per_cycle} replies. Halting queue run."
+                    )
+                    break
+
+                if (current_monthly_count + replies_sent) >= self.settings.monthly_max_replies:
+                    break
+                continue
 
             # 6. Apply stealth delay before consecutive replies
             self._apply_stealth_delay(replies_sent)
