@@ -285,11 +285,13 @@ class Humanizer:
         tweet_text: str,
         validate_links: bool = False,
         max_length: int = 280,
+        no_link_variation_ratio: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """
         Sanitize a list of `DraftVariation` objects (or dicts), stripping any accidental
         inline URLs from each variation's `text`, attaching diversified whitelisted proof URLs
-        across the variations, and enforcing the 280-character limit.
+        across the variations (or omitting links for `no_link_variation_ratio` of variations),
+        and enforcing the 280-character limit.
 
         Returns a list of dicts:
           [{"style": str, "text": str, "link": Optional[str]}, ...]
@@ -298,29 +300,62 @@ class Humanizer:
         lang = "ar" if is_arabic else "en"
         link_pool = cls.match_whitelisted_links_pool(tweet_text, lang=lang)
 
-        sanitized_variations: List[Dict[str, Any]] = []
-        used_links: List[str] = []
-
-        for idx, var in enumerate(variations):
+        # Filter valid variations first so we know the exact count
+        valid_items = []
+        for var in variations:
             style = getattr(var, "style", None) or (var.get("style") if isinstance(var, dict) else "factual") or "factual"
             raw_text = getattr(var, "text", None) if not isinstance(var, dict) else var.get("text", "")
             var_link = getattr(var, "recommended_link", None) if not isinstance(var, dict) else var.get("recommended_link")
-
-            # Strip any accidental inline URLs from Gemini's variation text first
             clean_narrative = cls.strip_inline_urls(raw_text or "")
-            if not clean_narrative:
+            if clean_narrative:
+                valid_items.append((style, clean_narrative, var_link))
+
+        total_valid = len(valid_items)
+        clamped_ratio = max(0.0, min(1.0, float(no_link_variation_ratio)))
+        target_linkless_count = int(round(total_valid * clamped_ratio))
+
+        # Distribute linkless slots evenly across the cohort (selecting from the end/interleaved)
+        linkless_indices = set()
+        if target_linkless_count > 0 and total_valid > 0:
+            for k in range(target_linkless_count):
+                # Spread evenly across indices
+                idx_slot = int(((k + 1) * total_valid) // (target_linkless_count + 1))
+                while idx_slot in linkless_indices and idx_slot < total_valid - 1:
+                    idx_slot += 1
+                while idx_slot in linkless_indices and idx_slot > 0:
+                    idx_slot -= 1
+                linkless_indices.add(idx_slot)
+
+        sanitized_variations: List[Dict[str, Any]] = []
+        used_links: List[str] = []
+        link_idx = 0
+
+        for idx, (style, clean_narrative, var_link) in enumerate(valid_items):
+            if idx in linkless_indices:
+                final_text = cls.sanitize(
+                    text=clean_narrative,
+                    link=None,
+                    auto_attach_whitelist=False,
+                    validate_links=False,
+                    max_length=max_length,
+                )
+                sanitized_variations.append({
+                    "style": style,
+                    "text": final_text,
+                    "link": None,
+                })
                 continue
 
             # Pick a diversified link from the pool if available
             chosen_link: Optional[str] = None
             if link_pool:
-                # Prefer an unused link from the pool first; otherwise cycle through the pool
                 for candidate in link_pool:
                     if candidate not in used_links:
                         chosen_link = candidate
                         break
                 if not chosen_link:
-                    chosen_link = link_pool[idx % len(link_pool)]
+                    chosen_link = link_pool[link_idx % len(link_pool)]
+                link_idx += 1
             elif var_link:
                 chosen_link = var_link
 

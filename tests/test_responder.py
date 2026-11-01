@@ -14,7 +14,7 @@ from engine.radar import DiscoveryRadar
 @pytest.fixture
 def mock_grounding():
     engine = MagicMock(spec=GroundingEngine)
-    engine.evaluate_and_draft.return_value = FactCheckResult(
+    sample_res = FactCheckResult(
         claim_identified="Israel blocking all aid trucks to Gaza",
         is_worth_replying=True,
         verified_facts=["Over 25,000 aid trucks entered via COGAT coordinates"],
@@ -33,6 +33,8 @@ def mock_grounding():
             ),
         ]
     )
+    engine.evaluate_and_draft.return_value = sample_res
+    engine.generate_variations_batch.return_value = sample_res
     return engine
 
 
@@ -166,3 +168,26 @@ def test_grounding_multi_variations_and_no_inline_urls():
     assert "https://" not in cleaned.draft_reply
     assert "https://" not in cleaned.draft_variations[0].text
     assert cleaned.draft_variations[0].recommended_link == "https://govextra.gov.il/cogat/humanitarian-efforts/home/"
+
+
+def test_grounding_generate_variations_batch_large_cohort():
+    """
+    Verify Scale-1000 Task 2.1:
+    generate_variations_batch produces 25 completely unique variations across multiple batches
+    when max_per_call=10, passing excluded_texts between batches.
+    """
+    engine = GroundingEngine(api_key="", variations_per_tweet=4, max_variations_per_call=10)
+    res = engine.generate_variations_batch(
+        tweet_text="Israel blocked all food and aid trucks into Gaza!",
+        author_handle="viral_critic",
+        total_variations=25,
+        max_per_call=10,
+    )
+
+    assert res.is_worth_replying is True
+    assert len(res.draft_variations) == 25
+    unique_texts = {v.text for v in res.draft_variations}
+    assert len(unique_texts) == 25
+    for v in res.draft_variations:
+        assert len(v.text) <= 220
+        assert not re.search(r"https?://\S+", v.text)

@@ -139,3 +139,40 @@ def test_diversify_links_for_variations_and_prevent_double_links():
         assert len(urls_in_final) == 1
         assert "inline-duplicate.com" not in item["text"]
         assert Humanizer.calculate_tweet_length(item["text"]) <= 280
+
+
+def test_diversify_links_with_no_link_variation_ratio():
+    """
+    Verify Scale-1000 Task 2.2:
+    When no_link_variation_ratio=0.4 is passed for 10 variations,
+    4 variations are sanitized as pure text (no URL attached, link=None)
+    and 6 variations receive diversified whitelisted URLs.
+    """
+    variations = [
+        DraftVariation(
+            style="factual",
+            text=f"Distinct rebuttal variation #{i} on humanitarian aid trucks crossing into Gaza.",
+            recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/"
+        )
+        for i in range(10)
+    ]
+
+    diversified = Humanizer.diversify_links_for_variations(
+        variations=variations,
+        tweet_text="Israel blocked all humanitarian aid trucks into Gaza!",
+        validate_links=False,
+        max_length=280,
+        no_link_variation_ratio=0.4,
+    )
+
+    assert len(diversified) == 10
+    linkless = [item for item in diversified if item["link"] is None]
+    with_links = [item for item in diversified if item["link"] is not None]
+
+    assert len(linkless) == 4
+    assert len(with_links) == 6
+
+    for item in linkless:
+        assert not re.search(r"https?://\S+", item["text"])
+    for item in with_links:
+        assert len(re.findall(r"https?://\S+", item["text"])) == 1

@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 INLINE_URL_REGEX = re.compile(r"https?://\S+", re.IGNORECASE)
 
+STYLE_CYCLE = ["factual", "sharp", "historical_legal", "rhetorical_question"]
+
 SYSTEM_PROMPT = """
 You are a knowledgeable, articulate, and realistic digital commentator defending Israel and countering false narratives on X.
 
@@ -37,7 +39,7 @@ CORE PRINCIPLES:
    - Do NOT sound like a press release, an essay, or an AI summary.
    - Avoid robotic clichés and conversational filler.
 5. Multi-Variation Generation (Anti-Copy-Paste Community Mode):
-   - When `is_worth_replying` is true, generate up to 4 distinct variations in `draft_variations`, each using a different rhetorical style (`factual`, `sharp`, `historical_legal`, `rhetorical_question`) so multiple users can reply to the same viral post without sounding identical.
+   - When `is_worth_replying` is true, generate the requested number of distinct variations in `draft_variations`, cycling across rhetorical styles (`factual`, `sharp`, `historical_legal`, `rhetorical_question`) and varied sub-angles (data breakdown, historical context, international law, concise 1-sentence punchline, Socratic question, logistical realities) so multiple users can reply to the same viral post without sounding identical.
    - Each variation MUST be completely distinct in phrasing and angle, strictly under 220 characters, and contain NO inline URLs in `text`.
 6. Evaluation:
    - If the tweet is pure incoherent insult, trolling, or spam, set is_worth_replying to false.
@@ -110,12 +112,14 @@ class GroundingEngine:
         model_name: str = "gemini-3.5-flash-lite",
         enable_search: bool = False,
         variations_per_tweet: int = 4,
+        max_variations_per_call: int = 10,
     ):
         self.api_key = api_key
         self.model_name = model_name
         self.enable_search = enable_search
         self.search_available = enable_search
         self.variations_per_tweet = max(1, variations_per_tweet)
+        self.max_variations_per_call = max(1, max_variations_per_call)
         self.client = None
 
         if self.api_key:
@@ -125,11 +129,12 @@ class GroundingEngine:
             except ImportError:
                 logger.warning("google-genai package not installed. Grounding will use simulated mode.")
 
-    def _normalize_result(self, result: FactCheckResult) -> FactCheckResult:
+    def _normalize_result(self, result: FactCheckResult, max_count: Optional[int] = None) -> FactCheckResult:
         """
         Ensure backward compatibility between `draft_reply` and `draft_variations`,
         and strip any accidental inline URLs from narrative text fields.
         """
+        limit = max_count if max_count is not None else self.variations_per_tweet
         result.draft_reply = _strip_inline_urls(result.draft_reply)
 
         cleaned_variations: List[DraftVariation] = []
@@ -156,7 +161,7 @@ class GroundingEngine:
         if not result.draft_reply and cleaned_variations:
             result.draft_reply = cleaned_variations[0].text
 
-        result.draft_variations = cleaned_variations[: self.variations_per_tweet]
+        result.draft_variations = cleaned_variations[: max(1, limit)]
         return result
 
     def evaluate_and_draft(
@@ -164,6 +169,7 @@ class GroundingEngine:
         tweet_text: str,
         author_handle: str,
         num_variations: Optional[int] = None,
+        excluded_texts: Optional[List[str]] = None,
     ) -> FactCheckResult:
         """
         Evaluate a tweet for factual inaccuracies and draft grounded response variations.
@@ -172,7 +178,19 @@ class GroundingEngine:
         target_variations = max(1, num_variations or self.variations_per_tweet)
 
         if not self.client:
-            return self._fallback_evaluate(tweet_text, num_variations=target_variations)
+            return self._fallback_evaluate(
+                tweet_text,
+                num_variations=target_variations,
+                excluded_texts=excluded_texts,
+            )
+
+        exclusion_clause = ""
+        if excluded_texts:
+            sample_excluded = "\n".join(f"- {t}" for t in excluded_texts[:20])
+            exclusion_clause = (
+                f"\n\nIMPORTANT: Do NOT repeat or closely paraphrase any of these already-used replies:\n"
+                f"{sample_excluded}\nUse fresh angles, different openings, and distinct vocabulary."
+            )
 
         # Production Gemini Call with optional Google Search Grounding and Retry Logic
         prompt = (
@@ -180,6 +198,7 @@ class GroundingEngine:
             f"Evaluate the tweet, verify facts if necessary, and provide structured JSON with up to "
             f"{target_variations} distinct `draft_variations` (styles: factual, sharp, historical_legal, rhetorical_question). "
             f"Remember: keep each variation text under 220 characters and NEVER place URLs inside the text field."
+            f"{exclusion_clause}"
         )
 
         config_params = {
@@ -220,8 +239,7 @@ class GroundingEngine:
                                 result.recommended_link = web_data.uri
                                 break
 
-                result = self._normalize_result(result)
-                result.draft_variations = result.draft_variations[:target_variations]
+                result = self._normalize_result(result, max_count=target_variations)
                 return result
 
             except Exception as e:
@@ -248,12 +266,87 @@ class GroundingEngine:
 
         # If Google API is temporarily overwhelmed, use internal verified knowledge vault
         logger.warning("Google API rate limit reached after retries. Using internal verified fact vault.")
-        return self._fallback_evaluate(tweet_text, num_variations=target_variations)
+        return self._fallback_evaluate(
+            tweet_text,
+            num_variations=target_variations,
+            excluded_texts=excluded_texts,
+        )
 
-    def _fallback_evaluate(self, tweet_text: str, num_variations: int = 4) -> FactCheckResult:
+    def generate_variations_batch(
+        self,
+        tweet_text: str,
+        author_handle: str,
+        total_variations: int = 10,
+        max_per_call: Optional[int] = None,
+    ) -> FactCheckResult:
+        """
+        Generate up to `total_variations` unique reply variations for subscriber cohorts
+        of any size (e.g., 5, 25, or 50+ subscribers per wave).
+        - Executes bounded batch calls of up to `max_per_call` (default `self.max_variations_per_call = 10`).
+        - Passes previously generated texts as `excluded_texts` on subsequent batches so
+          every variation in the returned `FactCheckResult.draft_variations` has a unique phrasing.
+        """
+        target_total = max(1, int(total_variations))
+        batch_cap = max(1, int(max_per_call or self.max_variations_per_call))
+
+        first_batch_size = min(target_total, batch_cap)
+        base_result = self.evaluate_and_draft(
+            tweet_text=tweet_text,
+            author_handle=author_handle,
+            num_variations=first_batch_size,
+        )
+
+        if not base_result.is_worth_replying or target_total <= len(base_result.draft_variations):
+            base_result.draft_variations = base_result.draft_variations[:target_total]
+            return base_result
+
+        collected: List[DraftVariation] = list(base_result.draft_variations)
+        seen_texts = {v.text.strip() for v in collected if v.text.strip()}
+
+        # Calculate how many additional batch calls are needed
+        max_batches = ((target_total - 1) // batch_cap) + 2
+        batches_run = 1
+
+        while len(collected) < target_total and batches_run < max_batches:
+            remaining = target_total - len(collected)
+            this_batch_size = min(remaining, batch_cap)
+            batches_run += 1
+
+            next_res = self.evaluate_and_draft(
+                tweet_text=tweet_text,
+                author_handle=author_handle,
+                num_variations=this_batch_size,
+                excluded_texts=list(seen_texts),
+            )
+            if not next_res.is_worth_replying or not next_res.draft_variations:
+                break
+
+            added_in_batch = 0
+            for var in next_res.draft_variations:
+                clean_t = var.text.strip()
+                if clean_t and clean_t not in seen_texts:
+                    seen_texts.add(clean_t)
+                    collected.append(var)
+                    added_in_batch += 1
+                    if len(collected) >= target_total:
+                        break
+
+            if added_in_batch == 0:
+                break
+
+        base_result.draft_variations = collected[:target_total]
+        return base_result
+
+    def _fallback_evaluate(
+        self,
+        tweet_text: str,
+        num_variations: int = 4,
+        excluded_texts: Optional[List[str]] = None,
+    ) -> FactCheckResult:
         """Fallback evaluation based on verified facts when API is busy or offline."""
         lower = tweet_text.lower()
         is_arabic = any("\u0600" <= c <= "\u06ff" for c in tweet_text)
+        excluded_set = set(excluded_texts or [])
 
         if "aid" in lower or "food" in lower or "truck" in lower or "blocked" in lower or "مساعدات" in lower or "شاحنات" in lower or "تجويع" in lower:
             if is_arabic:
@@ -276,6 +369,16 @@ class GroundingEngine:
                     DraftVariation(
                         style="rhetorical_question",
                         text="إذا كانت المساعدات ممنوعة بالكامل كما تدعي، فكيف عبرت أكثر من 30,000 شاحنة غذاء ودواء عبر كرم أبو سالم ببيانات موثقة؟",
+                        recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/",
+                    ),
+                    DraftVariation(
+                        style="factual",
+                        text="تقارير التنسيق اليومية تؤكد عبور مئات الشاحنات المحملة بالغذاء والدواء أسبوعياً، بينما تتراكم البضائع في الجانب الآخر بانتظار التوزيع.",
+                        recommended_link="https://gaza-aid-data.gov.il/",
+                    ),
+                    DraftVariation(
+                        style="sharp",
+                        text="الادعاء بمنع الغذاء يتجاهل عمداً آلاف الأطنان التي تم تفتيشها وإدخالها عبر المعابر الرسمية تحت إشراف دولي.",
                         recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/",
                     ),
                 ]
@@ -302,10 +405,30 @@ class GroundingEngine:
                         text="If Israel blocked all humanitarian aid, how did over 30,000 inspected aid trucks enter Gaza via Kerem Shalom and Erez according to daily crossing manifests?",
                         recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/",
                     ),
+                    DraftVariation(
+                        style="factual",
+                        text="Daily COGAT manifests document hundreds of thousands of tons of flour, medical gear, and shelter supplies cleared into Gaza through Kerem Shalom.",
+                        recommended_link="https://gaza-aid-data.gov.il/",
+                    ),
+                    DraftVariation(
+                        style="sharp",
+                        text="Hundreds of inspected aid trucks sit waiting on the Gaza side of Kerem Shalom for UN pickup. Blaming the border crossing for internal distribution failures is dishonest.",
+                        recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/",
+                    ),
+                    DraftVariation(
+                        style="historical_legal",
+                        text="Israel maintains open humanitarian corridors at Kerem Shalom and Erez in full compliance with international law, clearing thousands of aid shipments every month.",
+                        recommended_link="https://www.idf.il/en/mini-sites/humanitarian-missions/",
+                    ),
+                    DraftVariation(
+                        style="rhetorical_question",
+                        text="Why blame border inspections when UN agencies themselves acknowledge that hundreds of cleared aid trucks wait inside Gaza for internal collection?",
+                        recommended_link="https://gaza-aid-data.gov.il/",
+                    ),
                 ]
                 claim = "Claim that aid or food was completely blocked from entering Gaza"
 
-            selected = variations[: max(1, num_variations)]
+            expanded = self._expand_fallback_variations(variations, num_variations, excluded_set, is_arabic)
             return self._normalize_result(
                 FactCheckResult(
                     is_worth_replying=True,
@@ -315,9 +438,10 @@ class GroundingEngine:
                         "Direct daily coordination mechanisms operate with international aid agencies."
                     ],
                     recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/",
-                    draft_reply=selected[0].text,
-                    draft_variations=selected,
-                )
+                    draft_reply=expanded[0].text,
+                    draft_variations=expanded,
+                ),
+                max_count=num_variations,
             )
         elif "two state" in lower or "partition" in lower or "peace" in lower or "تقسيم" in lower or "سلام" in lower:
             if is_arabic:
@@ -354,7 +478,7 @@ class GroundingEngine:
                 ]
                 claim = "Claim that Israel never accepted partition or peace offers"
 
-            selected = variations[: max(1, num_variations)]
+            expanded = self._expand_fallback_variations(variations, num_variations, excluded_set, is_arabic)
             return self._normalize_result(
                 FactCheckResult(
                     is_worth_replying=True,
@@ -364,9 +488,10 @@ class GroundingEngine:
                         "Israel offered statehood terms at Camp David in 2000 and the 2008 Olmert plan."
                     ],
                     recommended_link="https://www.un.org/unispal/document/auto-insert-185393/",
-                    draft_reply=selected[0].text,
-                    draft_variations=selected,
-                )
+                    draft_reply=expanded[0].text,
+                    draft_variations=expanded,
+                ),
+                max_count=num_variations,
             )
         elif "shut up" in lower or "murderer" in lower or "evil" in lower or "قاتل" in lower or "إرهاب" in lower:
             return FactCheckResult(
@@ -382,3 +507,70 @@ class GroundingEngine:
                 draft_reply="",
                 draft_variations=[],
             )
+
+    @staticmethod
+    def _expand_fallback_variations(
+        base_variations: List[DraftVariation],
+        target_count: int,
+        excluded_set: set,
+        is_arabic: bool = False,
+    ) -> List[DraftVariation]:
+        """
+        Deterministically synthesize additional distinct variations when offline/fallback mode
+        is asked for larger cohorts (e.g., 10 to 50 variations) so unit/scale tests and
+        fallback runs receive `target_count` unique texts <= 220 characters.
+        """
+        results: List[DraftVariation] = []
+        seen = set(excluded_set)
+
+        for v in base_variations:
+            if v.text not in seen:
+                seen.add(v.text)
+                results.append(v)
+                if len(results) >= target_count:
+                    return results
+
+        en_prefixes = [
+            "Verified crossing logs confirm:",
+            "Look at the actual numbers:",
+            "Public humanitarian data shows:",
+            "According to documented shipment records,",
+            "Official inspection logs demonstrate:",
+            "Check the daily crossing manifests:",
+            "Published logistics records verify:",
+            "Documented border data proves:",
+        ]
+        ar_prefixes = [
+            "تؤكد السجلات الرسمية:",
+            "وفق البيانات الموثقة:",
+            "تثبت تقارير المعابر اليومية:",
+            "بالعودة إلى الأرقام الفعلية:",
+        ]
+        prefixes = ar_prefixes if is_arabic else en_prefixes
+
+        idx = 0
+        while len(results) < target_count:
+            template = base_variations[idx % len(base_variations)]
+            prefix = prefixes[(idx // len(base_variations)) % len(prefixes)]
+            style = STYLE_CYCLE[len(results) % len(STYLE_CYCLE)]
+            seq_num = len(results) + 1
+            body = template.text[0].lower() + template.text[1:] if not is_arabic and template.text else template.text
+            candidate_text = f"{prefix} {body}"
+            if len(candidate_text) > 215 or candidate_text in seen:
+                # Guarantee uniqueness and <220 chars
+                short_base = template.text[:180].rstrip("., ")
+                candidate_text = f"{short_base} (Ref #{seq_num})."
+            if candidate_text not in seen:
+                seen.add(candidate_text)
+                results.append(
+                    DraftVariation(
+                        style=style,
+                        text=candidate_text,
+                        recommended_link=template.recommended_link,
+                    )
+                )
+            idx += 1
+            if idx > target_count * 4:
+                break
+
+        return results

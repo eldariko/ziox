@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     max_thread_turns: int = Field(default=2, description="Maximum turns per thread before disengaging")
 
     # Anti-Ban Stealth Pacing & Rate Limits
-    max_replies_per_cycle: int = Field(default=2, description="Maximum replies dispatched per single scan or queue run")
+    max_replies_per_cycle: int = Field(default=2, description="Maximum direct replies published per single scan or queue run")
     min_reply_delay_seconds: float = Field(default=35.0, description="Minimum human hesitation pause in seconds")
     max_reply_delay_seconds: float = Field(default=85.0, description="Maximum human hesitation pause in seconds")
     link_cooldown_minutes: int = Field(default=60, description="Minutes to wait before reusing the exact same proof URL")
@@ -68,15 +68,43 @@ class Settings(BaseSettings):
         default=15.0,
         description="Maximum Gaussian jitter delay in seconds between consecutive X search queries"
     )
+    search_min_faves: int = Field(
+        default=0,
+        description="Minimum likes filter in search query (e.g. 5) to filter out 0-engagement noise"
+    )
     scanner_cooldown_minutes: int = Field(
         default=720,
         description="Minutes to quarantine the X scanner account if a rate-limit (429) or auth challenge (401/403) occurs"
     )
 
-    # Phase B: Multi-Variation AI Grounding
+    # Phase B & Scale-1000: Multi-Variation AI Grounding & Horizontal Cohort Sharding
     variations_per_tweet: int = Field(
         default=4,
-        description="Number of distinct reply variations generated per viral tweet in a single Gemini call"
+        description="Default number of distinct reply variations generated per viral tweet"
+    )
+    max_variations_per_gemini_call: int = Field(
+        default=10,
+        description="Maximum distinct reply variations requested in a single Gemini structured JSON call"
+    )
+    target_cohort_size_per_tweet: int = Field(
+        default=25,
+        description="Maximum eligible subscribers assigned to a single viral tweet wave per cycle (Horizontal Cohort Sharding)"
+    )
+    telegram_tweets_per_cycle: int = Field(
+        default=10,
+        description="Maximum viral tweets processed and sharded across Telegram subscribers in a single cycle"
+    )
+    no_link_variation_ratio: float = Field(
+        default=0.4,
+        description="Proportion of cohort reply variations (0.0 to 1.0) formatted as pure text without an attached URL"
+    )
+    max_user_daily_limit: int = Field(
+        default=5,
+        description="Central ceiling for a regular subscriber's self-configured daily quota (/limit <number>)"
+    )
+    max_unconfirmed_dispatches: int = Field(
+        default=5,
+        description="Maximum consecutive unconfirmed dispatches before auto-pausing an unresponsive subscriber"
     )
 
     # Keywords for X search (English and Arabic)
