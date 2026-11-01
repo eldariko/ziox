@@ -1,4 +1,4 @@
-"""Tests for Step 11: Turso Cloud SQLite Database Adapter."""
+"""Tests for Step 11 & Phase C: Turso Cloud SQLite Database Adapter."""
 
 import pytest
 import os
@@ -119,7 +119,7 @@ def test_repository_remote_mode_with_turso_client(tmp_path):
 
 
 def test_repository_remote_mode_crud_operations():
-    """Verify that tweet CRUD queries map cleanly through the remote TursoClient."""
+    """Verify that tweet, subscriber, dispatch, and bot_state queries map cleanly through remote TursoClient."""
     mock_client = MagicMock()
     mock_client.execute.return_value = MagicMock(
         rows=[{"name": "status"}],
@@ -158,6 +158,21 @@ def test_repository_remote_mode_crud_operations():
         thread = repo.get_thread("root_1")
         assert thread is not None
         assert thread["thread_root_id"] == "root_1"
+
+        # 6. Phase C remote subscriber & dispatch operations
+        repo.upsert_subscriber("777", username="remote_sub", tier="free", daily_limit=3)
+        repo.update_subscriber_style("777", "sharp")
+        mock_client.execute.return_value.rows = [{"chat_id": "777", "tier": "free", "daily_limit": 3, "preferred_style": "sharp"}]
+        subs = repo.get_active_subscribers()
+        assert len(subs) == 1
+        assert subs[0]["chat_id"] == "777"
+
+        mock_client.execute.return_value.rows_affected = 1
+        assert repo.record_dispatch("t_100", "777", "Some variation text", style="sharp") is True
+
+        mock_client.execute.return_value.rows = [{"value": "999"}]
+        repo.set_state("telegram_last_update_id", "999")
+        assert repo.get_state("telegram_last_update_id") == "999"
 
         repo.close()
 

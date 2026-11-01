@@ -1,6 +1,7 @@
 """Database repository providing data access and persistence for zioX."""
 
 import atexit
+import hashlib
 import logging
 import sqlite3
 from datetime import datetime, timezone
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class Repository:
     """
-    Manages database queries for threads, tweets, and logs.
+    Manages database queries for threads, tweets, subscribers, dispatches, state, and logs.
     Supports dual-mode engine:
     - Local Mode (default): standard Python sqlite3 with `db_path`.
     - Cloud Mode (Turso / libSQL): remote HTTP connection via native TursoClient (/v2/pipeline).
@@ -77,7 +78,6 @@ class Repository:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, params)
-                rows = cursor.fetchall()
                 conn.commit()
                 return cursor
 
@@ -440,6 +440,215 @@ class Repository:
             WHERE thread_root_id = ?
         """
         params = [status, thread_root_id]
+        if self.is_remote:
+            self._remote_client.execute(query, params)
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                conn.commit()
+
+    # --- Phase C: Multi-User Subscribers, Dispatches Ledger & Bot State ---
+
+    def upsert_subscriber(
+        self,
+        chat_id: str,
+        username: str = "",
+        tier: str = "free",
+        daily_limit: int = 3,
+        preferred_style: str = "any",
+        active: bool = True,
+    ) -> None:
+        """Insert a new Telegram subscriber or reactivate an existing one."""
+        clean_id = str(chat_id).strip()
+        active_int = 1 if active else 0
+        query = """
+            INSERT INTO subscribers (chat_id, username, tier, daily_limit, preferred_style, active, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                username = CASE WHEN excluded.username != '' THEN excluded.username ELSE subscribers.username END,
+                active = excluded.active,
+                updated_at = CURRENT_TIMESTAMP
+        """
+        params = [clean_id, username, tier, daily_limit, preferred_style, active_int]
+        if self.is_remote:
+            self._remote_client.execute(query, params)
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                conn.commit()
+
+    def deactivate_subscriber(self, chat_id: str) -> None:
+        """Mark a subscriber as inactive (/stop)."""
+        clean_id = str(chat_id).strip()
+        query = """
+            UPDATE subscribers
+            SET active = 0, updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = ?
+        """
+        if self.is_remote:
+            self._remote_client.execute(query, [clean_id])
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (clean_id,))
+                conn.commit()
+
+    def update_subscriber_style(self, chat_id: str, preferred_style: str) -> None:
+        """Update a subscriber's preferred reply style (/style <style>)."""
+        clean_id = str(chat_id).strip()
+        query = """
+            UPDATE subscribers
+            SET preferred_style = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = ?
+        """
+        params = [preferred_style.strip().lower(), clean_id]
+        if self.is_remote:
+            self._remote_client.execute(query, params)
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                conn.commit()
+
+    def get_active_subscribers(self) -> List[Dict[str, Any]]:
+        """
+        Return all active subscribers ordered by least-recently-dispatched first
+        (Round-Robin sharding fairness).
+        """
+        query = """
+            SELECT s.*,
+                   (SELECT MAX(d.dispatched_at) FROM dispatches d WHERE d.chat_id = s.chat_id) AS last_dispatched_at
+            FROM subscribers s
+            WHERE s.active = 1
+            ORDER BY COALESCE(last_dispatched_at, '1970-01-01') ASC, s.id ASC
+        """
+        if self.is_remote:
+            res = self._remote_client.execute(query)
+            return [dict(row) for row in res.rows]
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query)
+                return [dict(row) for row in cursor.fetchall()]
+
+    def get_admin_chat_ids(self) -> List[str]:
+        """Return chat_ids of active subscribers with tier = 'admin'."""
+        query = "SELECT chat_id FROM subscribers WHERE active = 1 AND tier = 'admin'"
+        if self.is_remote:
+            res = self._remote_client.execute(query)
+            return [str(row["chat_id"]) for row in res.rows]
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query)
+                return [str(row["chat_id"]) for row in cursor.fetchall()]
+
+    @staticmethod
+    def compute_variation_hash(text: str) -> str:
+        """Compute deterministic SHA-256 short digest for a reply variation text."""
+        return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:16]
+
+    def record_dispatch(
+        self,
+        tweet_id: str,
+        chat_id: str,
+        variation_text_or_hash: str,
+        style: str = "factual",
+    ) -> bool:
+        """
+        Record that a specific reply variation for `tweet_id` was dispatched to `chat_id`.
+        Returns True if newly recorded, False if already dispatched to this chat_id.
+        """
+        clean_chat = str(chat_id).strip()
+        v_hash = (
+            variation_text_or_hash
+            if len(variation_text_or_hash) == 16 and all(c in "0123456789abcdef" for c in variation_text_or_hash)
+            else self.compute_variation_hash(variation_text_or_hash)
+        )
+        query = """
+            INSERT OR IGNORE INTO dispatches (tweet_id, chat_id, variation_hash, style)
+            VALUES (?, ?, ?, ?)
+        """
+        params = [str(tweet_id), clean_chat, v_hash, style]
+        if self.is_remote:
+            res = self._remote_client.execute(query, params)
+            return res.rows_affected > 0
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                conn.commit()
+                return cursor.rowcount > 0
+
+    def has_received_tweet(self, tweet_id: str, chat_id: str) -> bool:
+        """Check whether `chat_id` has already received a review card for `tweet_id`."""
+        query = "SELECT 1 FROM dispatches WHERE tweet_id = ? AND chat_id = ?"
+        params = [str(tweet_id), str(chat_id).strip()]
+        if self.is_remote:
+            res = self._remote_client.execute(query, params)
+            return len(res.rows) > 0
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                return cursor.fetchone() is not None
+
+    def get_used_variation_hashes(self, tweet_id: str) -> List[str]:
+        """Return all `variation_hash` values already dispatched for `tweet_id` across any subscriber."""
+        query = "SELECT variation_hash FROM dispatches WHERE tweet_id = ?"
+        if self.is_remote:
+            res = self._remote_client.execute(query, [str(tweet_id)])
+            return [str(row["variation_hash"]) for row in res.rows]
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (str(tweet_id),))
+                return [str(row["variation_hash"]) for row in cursor.fetchall()]
+
+    def get_subscriber_daily_count(self, chat_id: str) -> int:
+        """Count how many dispatches `chat_id` has received today (UTC date)."""
+        query = """
+            SELECT COUNT(*) as count FROM dispatches
+            WHERE chat_id = ?
+            AND date(dispatched_at) = date('now')
+        """
+        params = [str(chat_id).strip()]
+        if self.is_remote:
+            res = self._remote_client.execute(query, params)
+            row = res.rows[0] if res.rows else None
+            return int(row["count"]) if row else 0
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                row = cursor.fetchone()
+                return int(row["count"]) if row else 0
+
+    def get_state(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Retrieve a persistent key-value state string from `bot_state`."""
+        query = "SELECT value FROM bot_state WHERE key = ?"
+        if self.is_remote:
+            res = self._remote_client.execute(query, [key])
+            return str(res.rows[0]["value"]) if res.rows else default
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (key,))
+                row = cursor.fetchone()
+                return str(row["value"]) if row else default
+
+    def set_state(self, key: str, value: str) -> None:
+        """Upsert a persistent key-value state string into `bot_state`."""
+        query = """
+            INSERT INTO bot_state (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+        """
+        params = [key, str(value)]
         if self.is_remote:
             self._remote_client.execute(query, params)
         else:

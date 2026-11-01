@@ -119,3 +119,53 @@ def test_repository_migration_removes_foreign_key(tmp_path):
         parent_tweet_id="untracked_tweet_999"
     )
     assert res is True
+
+
+def test_subscribers_dispatches_and_bot_state_lifecycle(tmp_path):
+    """Verify Task 3.1: Subscribers, dispatches ledger, and bot_state CRUD in local SQLite."""
+    db_file = str(tmp_path / "test_phase_c.db")
+    repo = Repository(db_file)
+
+    # 1. Subscriber registration & style updates
+    repo.upsert_subscriber(chat_id="1001", username="user_one", tier="free", daily_limit=3)
+    repo.upsert_subscriber(chat_id="1002", username="user_two", tier="pro", daily_limit=15)
+    repo.upsert_subscriber(chat_id="9999", username="admin_op", tier="admin", daily_limit=100)
+
+    active_subs = repo.get_active_subscribers()
+    assert len(active_subs) == 3
+
+    admin_ids = repo.get_admin_chat_ids()
+    assert admin_ids == ["9999"]
+
+    repo.update_subscriber_style("1001", "sharp")
+    updated_subs = {s["chat_id"]: s for s in repo.get_active_subscribers()}
+    assert updated_subs["1001"]["preferred_style"] == "sharp"
+
+    # Deactivate and reactivate
+    repo.deactivate_subscriber("1002")
+    assert len(repo.get_active_subscribers()) == 2
+    repo.upsert_subscriber(chat_id="1002", username="user_two", active=True)
+    assert len(repo.get_active_subscribers()) == 3
+
+    # 2. Dispatches ledger & deduplication
+    assert repo.has_received_tweet("tweet_500", "1001") is False
+    recorded = repo.record_dispatch("tweet_500", "1001", "Variation A text", style="sharp")
+    assert recorded is True
+    assert repo.has_received_tweet("tweet_500", "1001") is True
+    assert repo.get_subscriber_daily_count("1001") == 1
+
+    # Duplicate dispatch for same (tweet_id, chat_id) is ignored
+    recorded_again = repo.record_dispatch("tweet_500", "1001", "Variation A text", style="sharp")
+    assert recorded_again is False
+    assert repo.get_subscriber_daily_count("1001") == 1
+
+    used_hashes = repo.get_used_variation_hashes("tweet_500")
+    assert len(used_hashes) == 1
+    assert used_hashes[0] == repo.compute_variation_hash("Variation A text")
+
+    # 3. Bot state key-value persistence
+    assert repo.get_state("telegram_last_update_id") is None
+    repo.set_state("telegram_last_update_id", "54321")
+    assert repo.get_state("telegram_last_update_id") == "54321"
+    repo.set_state("telegram_last_update_id", "54325")
+    assert repo.get_state("telegram_last_update_id") == "54325"
