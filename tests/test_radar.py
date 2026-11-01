@@ -1,6 +1,25 @@
+from datetime import datetime, timezone
+from typing import List, Optional, Dict, Any
+from config.settings import Settings
 from database.repository import Repository
+from providers.base import (
+    BaseTwitterProvider,
+    Tweet,
+    ScannerCircuitBreakerError,
+    classify_scanner_exception,
+)
 from providers.mock_provider import MockTwitterProvider
-from engine.radar import DiscoveryRadar, extract_tweet_id
+from engine.radar import DiscoveryRadar, extract_tweet_id, calculate_search_jitter
+
+
+def test_phase_a_settings_defaults():
+    """Verify Task 1.1: Phase A scanner safety settings load with expected defaults."""
+    s = Settings(_env_file=None)
+    assert s.combine_search_queries is True
+    assert s.max_keywords_per_query == 6
+    assert s.min_search_delay_seconds == 6.0
+    assert s.max_search_delay_seconds == 15.0
+    assert s.scanner_cooldown_minutes == 720
 
 
 def test_extract_tweet_id():
@@ -60,3 +79,97 @@ def test_radar_scan_keywords(tmp_path):
     assert len(discovered) > 0
     pending = repo.get_pending_tweets(limit=10)
     assert len(pending) == len(discovered)
+
+
+def test_build_consolidated_queries_script_grouping():
+    """Verify Task 1.3: English and Arabic keywords are grouped separately into Boolean OR queries."""
+    keywords = [
+        "Israel",
+        "Gaza",
+        "IDF",
+        "Zionism",
+        "Hostages",
+        "Middle East",
+        "إسرائيل",
+        "غزة",
+        "مساعدات غزة",
+    ]
+    queries = DiscoveryRadar.build_consolidated_queries(keywords, max_per_query=6)
+    assert len(queries) == 2
+    assert queries[0] == '("Israel" OR "Gaza" OR "IDF" OR "Zionism" OR "Hostages" OR "Middle East")'
+    assert queries[1] == '("إسرائيل" OR "غزة" OR "مساعدات غزة")'
+
+
+def test_calculate_search_jitter_bounds():
+    """Verify Task 1.3: Gaussian search jitter stays strictly within [min_delay, max_delay]."""
+    for _ in range(50):
+        delay = calculate_search_jitter(6.0, 15.0)
+        assert 6.0 <= delay <= 15.0
+
+
+def test_classify_scanner_exception():
+    """Verify Task 1.2: Rate limits (429), auth errors (401/403), and account locks are classified properly."""
+    err_429 = classify_scanner_exception(RuntimeError("HTTP 429 Too Many Requests: Rate limit exceeded"))
+    assert isinstance(err_429, ScannerCircuitBreakerError)
+    assert err_429.status_code == 429
+    assert err_429.reason == "RATE_LIMIT_429"
+
+    err_401 = classify_scanner_exception(RuntimeError("401 Unauthorized: Could not authenticate you"))
+    assert isinstance(err_401, ScannerCircuitBreakerError)
+    assert err_401.status_code == 401
+    assert err_401.reason == "AUTH_FAILURE_401"
+
+    err_lock = classify_scanner_exception(RuntimeError("Error 326: Your account is temporarily locked (Arkose challenge)"))
+    assert isinstance(err_lock, ScannerCircuitBreakerError)
+    assert err_lock.reason == "ACCOUNT_LOCKED_OR_CHALLENGE"
+
+    # Generic transient network error should NOT trip the account circuit breaker
+    err_generic = classify_scanner_exception(ConnectionError("Connection reset by peer"))
+    assert err_generic is None
+
+
+class _CircuitBreakerStubProvider(BaseTwitterProvider):
+    """Stub provider that raises a 429 rate-limit error on the first query and tracks call count."""
+
+    def __init__(self):
+        self.queries_called: List[str] = []
+
+    def search_recent_tweets(self, query: str, limit: int = 10) -> List[Tweet]:
+        self.queries_called.append(query)
+        raise ScannerCircuitBreakerError("Rate limit 429 on search_tweet", status_code=429, reason="RATE_LIMIT_429")
+
+    def post_reply(self, text: str, reply_to_tweet_id: str, media_paths: Optional[List[str]] = None) -> Dict[str, Any]:
+        return {}
+
+    def get_tweet(self, tweet_id: str) -> Optional[Tweet]:
+        return None
+
+
+def test_radar_circuit_breaker_aborts_immediately(tmp_path):
+    """Verify Task 1.2 & 1.3: When query 1 triggers a 429 circuit breaker, Radar aborts immediately without running query 2."""
+    db_file = str(tmp_path / "test_cb.db")
+    repo = Repository(db_file)
+    radar = DiscoveryRadar(repo)
+    stub_provider = _CircuitBreakerStubProvider()
+    triggered_errors: List[ScannerCircuitBreakerError] = []
+
+    keywords = ["Israel", "Gaza", "إسرائيل", "غزة"]
+    results = radar.scan_keywords(
+        provider=stub_provider,
+        keywords=keywords,
+        combine_queries=True,
+        max_keywords_per_query=2,
+        dry_run=True,
+        on_circuit_breaker=lambda err: triggered_errors.append(err),
+    )
+
+    assert results == []
+    # Only the first query ("Israel" OR "Gaza") was attempted; the second Arabic query was aborted!
+    assert len(stub_provider.queries_called) == 1
+    assert radar.last_circuit_breaker_error is not None
+    assert radar.last_circuit_breaker_error.reason == "RATE_LIMIT_429"
+    assert len(triggered_errors) == 1
+
+    logs = repo.get_recent_logs(limit=5)
+    assert len(logs) == 1
+    assert logs[0]["status"] == "ABORTED_CIRCUIT_BREAKER_RATE_LIMIT_429"

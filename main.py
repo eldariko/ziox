@@ -239,7 +239,12 @@ def main():
             provider=provider,
             keywords=settings.search_keywords,
             limit_per_keyword=5,
-            min_virality_score=settings.virality_threshold
+            min_virality_score=settings.virality_threshold,
+            combine_queries=settings.combine_search_queries,
+            max_keywords_per_query=settings.max_keywords_per_query,
+            min_search_delay_seconds=settings.min_search_delay_seconds,
+            max_search_delay_seconds=settings.max_search_delay_seconds,
+            dry_run=settings.dry_run,
         )
         print(f"[zioX Radar] Scan complete. Enqueued {len(discovered)} candidate tweets into database.")
         for item in discovered:

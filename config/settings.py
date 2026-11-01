@@ -51,6 +51,34 @@ class Settings(BaseSettings):
     link_cooldown_minutes: int = Field(default=60, description="Minutes to wait before reusing the exact same proof URL")
     start_jitter_max_minutes: float = Field(default=15.0, description="Maximum random start delay in minutes for external schedulers")
 
+    # Phase A: Scanner Safety Shield & Boolean OR Query Consolidation
+    combine_search_queries: bool = Field(
+        default=True,
+        description="When True, group search keywords into combined Boolean OR queries by script"
+    )
+    max_keywords_per_query: int = Field(
+        default=6,
+        description="Maximum keywords combined into a single Boolean OR search query"
+    )
+    min_search_delay_seconds: float = Field(
+        default=6.0,
+        description="Minimum Gaussian jitter delay in seconds between consecutive X search queries"
+    )
+    max_search_delay_seconds: float = Field(
+        default=15.0,
+        description="Maximum Gaussian jitter delay in seconds between consecutive X search queries"
+    )
+    scanner_cooldown_minutes: int = Field(
+        default=720,
+        description="Minutes to quarantine the X scanner account if a rate-limit (429) or auth challenge (401/403) occurs"
+    )
+
+    # Phase B: Multi-Variation AI Grounding
+    variations_per_tweet: int = Field(
+        default=4,
+        description="Number of distinct reply variations generated per viral tweet in a single Gemini call"
+    )
+
     # Keywords for X search (English and Arabic)
     search_keywords: List[str] = Field(
         default=[

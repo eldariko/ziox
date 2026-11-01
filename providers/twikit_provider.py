@@ -8,7 +8,12 @@ import threading
 import concurrent.futures
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
-from providers.base import BaseTwitterProvider, Tweet
+from providers.base import (
+    BaseTwitterProvider,
+    Tweet,
+    ScannerCircuitBreakerError,
+    classify_scanner_exception,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +198,10 @@ class TwikitTwitterProvider(BaseTwitterProvider):
                 in_reply_to_tweet_id=str(getattr(raw_tweet, "in_reply_to", "")) or None
             )
         except Exception as e:
+            cb_err = classify_scanner_exception(e)
+            if cb_err is not None:
+                logger.critical(f"[CIRCUIT BREAKER] Account risk detected in get_tweet({tweet_id}): {cb_err}")
+                raise cb_err from e
             logger.error(f"Failed fetching tweet {tweet_id} via Twikit: {e}")
             return None
 
@@ -256,5 +265,11 @@ class TwikitTwitterProvider(BaseTwitterProvider):
                 )
             return tweets[:limit]
         except Exception as e:
+            cb_err = classify_scanner_exception(e)
+            if cb_err is not None:
+                logger.critical(
+                    f"[CIRCUIT BREAKER] Account risk detected while searching '{query}' via Twikit: {cb_err}"
+                )
+                raise cb_err from e
             logger.error(f"Failed searching tweets for '{query}' via Twikit: {e}")
             return []

@@ -1,11 +1,17 @@
 """Discovery Radar module for finding and queuing viral candidate tweets on X."""
 
+import random
 import re
 import time
 import logging
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
-from providers.base import Tweet, BaseTwitterProvider
+from typing import Optional, List, Dict, Any, Callable
+from providers.base import (
+    Tweet,
+    BaseTwitterProvider,
+    ScannerCircuitBreakerError,
+    classify_scanner_exception,
+)
 from database.repository import Repository
 from engine.virality import calculate_virality_score, get_virality_tier
 
@@ -33,11 +39,82 @@ def extract_tweet_id(url_or_id: str) -> Optional[str]:
     return None
 
 
+def calculate_search_jitter(min_delay: float, max_delay: float) -> float:
+    """
+    Calculate human-like Gaussian search delay bounded strictly between min_delay and max_delay.
+    """
+    if min_delay <= 0 and max_delay <= 0:
+        return 0.0
+    if min_delay >= max_delay:
+        return float(max(0.0, min_delay))
+    mean = (min_delay + max_delay) / 2.0
+    std_dev = (max_delay - min_delay) / 6.0
+    delay = random.gauss(mean, std_dev)
+    return max(min_delay, min(max_delay, delay))
+
+
 class DiscoveryRadar:
     """Manages viral post discovery, scoring, and queue ingestion."""
 
     def __init__(self, repository: Repository):
         self.repo = repository
+        self.last_circuit_breaker_error: Optional[ScannerCircuitBreakerError] = None
+
+    @staticmethod
+    def _is_arabic_term(term: str) -> bool:
+        """Return True if the keyword contains Arabic script characters."""
+        return any("\u0600" <= ch <= "\u06ff" for ch in term)
+
+    @staticmethod
+    def _format_keyword_for_or(term: str) -> str:
+        """Wrap multi-word or quoted keywords cleanly in double quotes for X Boolean OR syntax."""
+        cleaned = term.strip().strip('"')
+        if not cleaned:
+            return ""
+        return f'"{cleaned}"'
+
+    @classmethod
+    def build_consolidated_queries(
+        cls,
+        keywords: List[str],
+        max_per_query: int = 6
+    ) -> List[str]:
+        """
+        Consolidate search keywords into script-grouped (English/Latin vs. Arabic)
+        Boolean OR queries up to `max_per_query` terms per query.
+        Example:
+          ['Israel', 'Gaza', 'Middle East', 'إسرائيل', 'مساعدات غزة']
+          -> [
+               '("Israel" OR "Gaza" OR "Middle East")',
+               '("إسرائيل" OR "مساعدات غزة")'
+             ]
+        """
+        if max_per_query <= 1:
+            return [k.strip() for k in keywords if k.strip()]
+
+        latin_terms: List[str] = []
+        arabic_terms: List[str] = []
+
+        for kw in keywords:
+            cleaned = kw.strip()
+            if not cleaned:
+                continue
+            if cls._is_arabic_term(cleaned):
+                arabic_terms.append(cleaned)
+            else:
+                latin_terms.append(cleaned)
+
+        queries: List[str] = []
+        for group in (latin_terms, arabic_terms):
+            for i in range(0, len(group), max_per_query):
+                chunk = group[i:i + max_per_query]
+                if len(chunk) == 1:
+                    queries.append(cls._format_keyword_for_or(chunk[0]))
+                elif chunk:
+                    joined = " OR ".join(cls._format_keyword_for_or(t) for t in chunk)
+                    queries.append(f"({joined})")
+
+        return queries
 
     def enqueue_manual(
         self,
@@ -93,19 +170,43 @@ class DiscoveryRadar:
         provider: BaseTwitterProvider,
         keywords: List[str],
         limit_per_keyword: int = 5,
-        min_virality_score: float = 0.0
+        min_virality_score: float = 0.0,
+        combine_queries: bool = True,
+        max_keywords_per_query: int = 6,
+        min_search_delay_seconds: float = 6.0,
+        max_search_delay_seconds: float = 15.0,
+        dry_run: bool = True,
+        on_circuit_breaker: Optional[Callable[[ScannerCircuitBreakerError], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Scan recent posts across search keywords using a provider,
         calculate virality velocity, and enqueue candidate posts.
+
+        Phase A Safety Upgrades:
+        1. Consolidates keywords into script-grouped Boolean OR queries when `combine_queries=True`.
+        2. Replaces static 1.2s sleep with Gaussian jitter (`min_search_delay_seconds`..`max_search_delay_seconds`).
+        3. Immediately aborts the scan cycle if a `ScannerCircuitBreakerError` (401/403/429/Lock) occurs.
         """
+        self.last_circuit_breaker_error = None
         enqueued_items: List[Dict[str, Any]] = []
 
-        for idx, keyword in enumerate(keywords):
+        queries_to_run = (
+            self.build_consolidated_queries(keywords, max_per_query=max_keywords_per_query)
+            if combine_queries
+            else [k.strip() for k in keywords if k.strip()]
+        )
+
+        for idx, query_str in enumerate(queries_to_run):
             if idx > 0:
-                time.sleep(1.2)
+                delay = calculate_search_jitter(min_search_delay_seconds, max_search_delay_seconds)
+                if dry_run or delay <= 0:
+                    logger.info(f"[RADAR STEALTH] Simulated {delay:.1f}s Gaussian search delay before query {idx + 1}.")
+                else:
+                    logger.info(f"[RADAR STEALTH] Sleeping {delay:.1f}s before query {idx + 1} to protect scanner profile...")
+                    time.sleep(delay)
+
             try:
-                tweets = provider.search_recent_tweets(keyword, limit=limit_per_keyword)
+                tweets = provider.search_recent_tweets(query_str, limit=limit_per_keyword)
                 for tweet in tweets:
                     if self.repo.is_tweet_processed(tweet.id):
                         continue
@@ -130,10 +231,30 @@ class DiscoveryRadar:
                             "text": tweet.text,
                             "virality_score": score,
                             "tier": tier,
-                            "keyword": keyword
+                            "keyword": query_str
                         })
             except Exception as e:
-                logger.error(f"Radar failed scanning keyword '{keyword}': {e}", exc_info=True)
+                cb_err = classify_scanner_exception(e)
+                if cb_err is not None:
+                    self.last_circuit_breaker_error = cb_err
+                    logger.critical(
+                        f"[RADAR CIRCUIT BREAKER] Halting scan immediately to protect X profile! "
+                        f"Reason: {cb_err.reason} | Details: {cb_err}"
+                    )
+                    self.repo.log_run(
+                        tweets_scanned=len(enqueued_items),
+                        replies_sent=0,
+                        status=f"ABORTED_CIRCUIT_BREAKER_{cb_err.reason}",
+                        error_message=str(cb_err)
+                    )
+                    if on_circuit_breaker is not None:
+                        try:
+                            on_circuit_breaker(cb_err)
+                        except Exception as hook_err:
+                            logger.error(f"Circuit breaker callback failed: {hook_err}")
+                    break
+
+                logger.error(f"Radar failed scanning query '{query_str}': {e}", exc_info=True)
                 continue
 
         return enqueued_items
