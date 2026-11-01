@@ -1,11 +1,12 @@
-"""Tests for Step 8B: Targeted Action and Queue Processing Responder."""
+"""Tests for Step 8B & Phase B: Targeted Action, Queue Processing Responder, and Multi-Variation Grounding."""
 
+import re
 import pytest
 from unittest.mock import MagicMock, patch
 from config.settings import Settings
 from database.repository import Repository
 from providers.mock_provider import MockTwitterProvider
-from engine.grounding import GroundingEngine, FactCheckResult
+from engine.grounding import GroundingEngine, FactCheckResult, DraftVariation
 from engine.orchestrator import BotOrchestrator
 from engine.radar import DiscoveryRadar
 
@@ -18,7 +19,19 @@ def mock_grounding():
         is_worth_replying=True,
         verified_facts=["Over 25,000 aid trucks entered via COGAT coordinates"],
         draft_reply="Official records confirm over 25,000 aid trucks have entered through Kerem Shalom and Erez.",
-        recommended_link="https://gaza-aid-data.gov.il"
+        recommended_link="https://gaza-aid-data.gov.il",
+        draft_variations=[
+            DraftVariation(
+                style="factual",
+                text="Official records confirm over 25,000 aid trucks have entered through Kerem Shalom and Erez.",
+                recommended_link="https://gaza-aid-data.gov.il"
+            ),
+            DraftVariation(
+                style="sharp",
+                text="Claiming zero aid enters while 25,000+ trucks crossed via Kerem Shalom ignores basic crossing records.",
+                recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/"
+            ),
+        ]
     )
     return engine
 
@@ -111,3 +124,45 @@ def test_process_queue_live_publishing(test_setup):
     assert report["replies_sent"] == 1
     assert report["results"][0]["published"] is True
     assert len(provider.posted_replies) == 1
+
+
+def test_grounding_multi_variations_and_no_inline_urls():
+    """Verify Task 2.1: GroundingEngine generates multiple distinct variations <=220 chars without inline URLs."""
+    engine = GroundingEngine(api_key="", variations_per_tweet=4)
+    res = engine.evaluate_and_draft(
+        tweet_text="Israel has blocked all food and humanitarian aid trucks to Gaza!",
+        author_handle="test_critic",
+        num_variations=4
+    )
+
+    assert res.is_worth_replying is True
+    assert res.draft_reply != ""
+    assert len(res.draft_variations) == 4
+
+    styles = [v.style for v in res.draft_variations]
+    assert len(set(styles)) == 4  # factual, sharp, historical_legal, rhetorical_question
+
+    texts = [v.text for v in res.draft_variations]
+    assert len(set(texts)) == 4  # All 4 variations have unique phrasing
+
+    for var in res.draft_variations:
+        assert len(var.text) <= 220
+        assert not re.search(r"https?://\S+", var.text)
+
+    # Verify _normalize_result strips any accidental inline URL returned by LLM
+    dirty = FactCheckResult(
+        is_worth_replying=True,
+        claim_identified="Test claim",
+        draft_reply="Check the facts https://bad-inline.com right now.",
+        draft_variations=[
+            DraftVariation(
+                style="factual",
+                text="Data proves otherwise https://accidental-inline.org in records.",
+                recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/"
+            )
+        ]
+    )
+    cleaned = engine._normalize_result(dirty)
+    assert "https://" not in cleaned.draft_reply
+    assert "https://" not in cleaned.draft_variations[0].text
+    assert cleaned.draft_variations[0].recommended_link == "https://govextra.gov.il/cogat/humanitarian-efforts/home/"

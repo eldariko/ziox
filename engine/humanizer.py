@@ -4,11 +4,13 @@ import re
 import json
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
 WHITELIST_PATH = Path(__file__).resolve().parent.parent / "assets" / "proofs" / "whitelisted_sources.json"
+
+INLINE_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 
 ROBOTIC_PHRASES = [
     r"\bit'?s crucial to understand that\b\s*",
@@ -44,9 +46,8 @@ class Humanizer:
         """
         if not text:
             return 0
-        url_pattern = re.compile(r"https?://\S+")
-        urls = url_pattern.findall(text)
-        text_without_urls = url_pattern.sub("", text)
+        urls = INLINE_URL_PATTERN.findall(text)
+        text_without_urls = INLINE_URL_PATTERN.sub("", text)
 
         length = len(urls) * cls.TWITTER_URL_WEIGHT
         for char in text_without_urls:
@@ -61,12 +62,18 @@ class Humanizer:
     @staticmethod
     def strip_em_dashes(text: str) -> str:
         """Replace all em-dashes and en-dashes with natural punctuation."""
-        # Replace em-dash and en-dash with comma or standard dash
         cleaned = text.replace("—", ", ").replace("–", " - ")
-        # Clean up possible double spaces or awkward comma spacing
         cleaned = re.sub(r"\s*,\s*,", ",", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned
+
+    @staticmethod
+    def strip_inline_urls(text: str) -> str:
+        """Remove any raw HTTP/HTTPS URLs embedded inside the narrative text."""
+        if not text:
+            return ""
+        cleaned = INLINE_URL_PATTERN.sub("", text)
+        return re.sub(r"\s+", " ", cleaned).strip()
 
     @staticmethod
     def clean_robotic_phrases(text: str) -> str:
@@ -84,7 +91,6 @@ class Humanizer:
     @staticmethod
     def enforce_sentence_limit(text: str, max_sentences: int = 3) -> str:
         """Ensure reply does not exceed the allowed sentence count."""
-        # Split on sentence terminators (. ! ? and Arabic ؟ ۔)
         sentences = re.split(r"(?<=[.!?؟۔])\s+", text.strip())
         if len(sentences) > max_sentences:
             return " ".join(sentences[:max_sentences])
@@ -137,7 +143,6 @@ class Humanizer:
             if candidate_words:
                 trimmed = " ".join(candidate_words) + "..."
             else:
-                # Extreme fallback: hard character slice
                 trimmed = narrative[:max(1, budget - 3)] + "..."
 
         if url_suffix:
@@ -165,6 +170,39 @@ class Humanizer:
             return None
         return None
 
+    @staticmethod
+    def match_whitelisted_links_pool(text_or_claim: str, lang: str = "en") -> List[str]:
+        """
+        Return a pool of distinct whitelisted URLs matching keywords in `text_or_claim`.
+        Used to diversify proof URLs across multiple community reply variations.
+        """
+        if not WHITELIST_PATH.exists():
+            return []
+        try:
+            with open(WHITELIST_PATH, "r", encoding="utf-8") as f:
+                vault = json.load(f)
+            lower_text = text_or_claim.lower()
+            pool: List[str] = []
+            for key, data in vault.items():
+                if any(kw.lower() in lower_text for kw in data.get("keywords", [])):
+                    sources = data.get("sources", {})
+                    primary = sources.get(lang) or sources.get("en")
+                    if primary and primary not in pool:
+                        pool.append(primary)
+                    for alt in data.get("alternate_sources", []):
+                        if alt and alt not in pool:
+                            pool.append(alt)
+            # If no specific keyword matched, collect primary sources across categories as fallback pool
+            if not pool:
+                for key, data in vault.items():
+                    sources = data.get("sources", {})
+                    primary = sources.get(lang) or sources.get("en")
+                    if primary and primary not in pool:
+                        pool.append(primary)
+            return pool
+        except Exception:
+            return []
+
     @classmethod
     def resolve_valid_link(
         cls,
@@ -178,7 +216,6 @@ class Humanizer:
         If proposed link is dead/inaccessible, falls back to a verified whitelisted link.
         If no verified link is live, returns None.
         """
-        # Local import to prevent circular dependencies
         from engine.link_validator import LinkValidator
 
         is_arabic = any("\u0600" <= c <= "\u06ff" for c in text_context)
@@ -211,19 +248,20 @@ class Humanizer:
         validate_links: bool = True,
         max_length: int = 280
     ) -> str:
-        """Run complete sanitation pipeline on draft reply text."""
+        """
+        Run complete sanitation pipeline on draft reply text.
+        Guarantees at most ONE proof URL is present at the end of the reply.
+        """
         sanitized = cls.strip_em_dashes(text)
         sanitized = cls.clean_robotic_phrases(sanitized)
         sanitized = cls.enforce_sentence_limit(sanitized, max_sentences=3)
 
-        # Check existing trailing URL if present in text
-        url_match = re.search(r"(https?://\S+)\s*$", sanitized)
-        extracted_link = url_match.group(1) if url_match else None
-        if extracted_link:
-            # Strip trailing URL from narrative before resolving validated link
-            sanitized = sanitized[:url_match.start()].strip()
+        # Extract any inline URL if no explicit link was passed, then strip ALL inline URLs from narrative
+        found_urls = INLINE_URL_PATTERN.findall(sanitized)
+        if found_urls:
             if not link:
-                link = extracted_link
+                link = found_urls[-1]
+            sanitized = cls.strip_inline_urls(sanitized)
 
         effective_link = cls.resolve_valid_link(
             proposed_link=link,
@@ -232,10 +270,75 @@ class Humanizer:
             validate_http=validate_links
         )
 
-        if effective_link and effective_link.strip() and effective_link not in sanitized:
+        if effective_link and effective_link.strip():
             sanitized = f"{sanitized} {effective_link.strip()}"
 
         # Strictly enforce Twitter's 280-character limit
         sanitized = cls.enforce_length_limit(sanitized, max_length=max_length)
 
         return sanitized.strip()
+
+    @classmethod
+    def diversify_links_for_variations(
+        cls,
+        variations: List[Any],
+        tweet_text: str,
+        validate_links: bool = False,
+        max_length: int = 280,
+    ) -> List[Dict[str, Any]]:
+        """
+        Sanitize a list of `DraftVariation` objects (or dicts), stripping any accidental
+        inline URLs from each variation's `text`, attaching diversified whitelisted proof URLs
+        across the variations, and enforcing the 280-character limit.
+
+        Returns a list of dicts:
+          [{"style": str, "text": str, "link": Optional[str]}, ...]
+        """
+        is_arabic = any("\u0600" <= c <= "\u06ff" for c in tweet_text)
+        lang = "ar" if is_arabic else "en"
+        link_pool = cls.match_whitelisted_links_pool(tweet_text, lang=lang)
+
+        sanitized_variations: List[Dict[str, Any]] = []
+        used_links: List[str] = []
+
+        for idx, var in enumerate(variations):
+            style = getattr(var, "style", None) or (var.get("style") if isinstance(var, dict) else "factual") or "factual"
+            raw_text = getattr(var, "text", None) if not isinstance(var, dict) else var.get("text", "")
+            var_link = getattr(var, "recommended_link", None) if not isinstance(var, dict) else var.get("recommended_link")
+
+            # Strip any accidental inline URLs from Gemini's variation text first
+            clean_narrative = cls.strip_inline_urls(raw_text or "")
+            if not clean_narrative:
+                continue
+
+            # Pick a diversified link from the pool if available
+            chosen_link: Optional[str] = None
+            if link_pool:
+                # Prefer an unused link from the pool first; otherwise cycle through the pool
+                for candidate in link_pool:
+                    if candidate not in used_links:
+                        chosen_link = candidate
+                        break
+                if not chosen_link:
+                    chosen_link = link_pool[idx % len(link_pool)]
+            elif var_link:
+                chosen_link = var_link
+
+            if chosen_link:
+                used_links.append(chosen_link)
+
+            final_text = cls.sanitize(
+                text=clean_narrative,
+                link=chosen_link,
+                auto_attach_whitelist=(chosen_link is None),
+                validate_links=validate_links,
+                max_length=max_length,
+            )
+
+            sanitized_variations.append({
+                "style": style,
+                "text": final_text,
+                "link": chosen_link,
+            })
+
+        return sanitized_variations

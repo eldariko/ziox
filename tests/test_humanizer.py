@@ -1,3 +1,5 @@
+import re
+from engine.grounding import DraftVariation
 from engine.humanizer import Humanizer
 
 
@@ -96,3 +98,44 @@ def test_enforce_length_limit_word_boundary():
     assert Humanizer.calculate_tweet_length(limited) <= 280
     assert link in limited
     assert limited.endswith(link)
+
+
+def test_diversify_links_for_variations_and_prevent_double_links():
+    """Verify Task 2.2: Accidental inline URLs are stripped and variations receive distinct whitelisted links <= 280 chars."""
+    variations = [
+        DraftVariation(
+            style="factual",
+            text="Over 30,000 aid trucks entered via Kerem Shalom https://inline-duplicate.com/bad according to COGAT.",
+            recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/"
+        ),
+        DraftVariation(
+            style="sharp",
+            text="Claiming aid is blocked ignores 30,000+ documented trucks entering Gaza.",
+            recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/"
+        ),
+        DraftVariation(
+            style="historical_legal",
+            text="Daily humanitarian inspections at Kerem Shalom coordinate hundreds of thousands of tons of food.",
+            recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/"
+        ),
+    ]
+
+    diversified = Humanizer.diversify_links_for_variations(
+        variations=variations,
+        tweet_text="Israel blocked all humanitarian aid trucks into Gaza!",
+        validate_links=False,
+        max_length=280,
+    )
+
+    assert len(diversified) == 3
+
+    attached_links = [item["link"] for item in diversified]
+    # All 3 variations should receive distinct links from the aid_and_food alternate_sources pool
+    assert len(set(attached_links)) == 3
+
+    for item in diversified:
+        urls_in_final = re.findall(r"https?://\S+", item["text"])
+        # Strictly 1 URL per variation (no double links!)
+        assert len(urls_in_final) == 1
+        assert "inline-duplicate.com" not in item["text"]
+        assert Humanizer.calculate_tweet_length(item["text"]) <= 280

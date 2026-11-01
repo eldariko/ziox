@@ -19,6 +19,11 @@
       "en": "https://govextra.gov.il/cogat/humanitarian-efforts/home/",
       "ar": "https://govextra.gov.il/cogat/humanitarian-efforts/home/"
     },
+    "alternate_sources": [
+      "https://govextra.gov.il/cogat/humanitarian-efforts/home/",
+      "https://gaza-aid-data.gov.il/",
+      "https://www.idf.il/en/mini-sites/humanitarian-missions/"
+    ],
     "description": "Official Israeli COGAT daily humanitarian dashboard and crossing manifests."
   },
   "partition_and_statehood": {
@@ -40,6 +45,11 @@
       "en": "https://www.un.org/unispal/document/auto-insert-185393/",
       "ar": "https://www.un.org/unispal/document/auto-insert-185393/"
     },
+    "alternate_sources": [
+      "https://www.un.org/unispal/document/auto-insert-185393/",
+      "https://avalon.law.yale.edu/20th_century/res181.asp",
+      "https://www.jewishvirtuallibrary.org/united-nations-partition-plan-of-1947"
+    ],
     "description": "United Nations General Assembly Resolution 181 (II) official Partition Plan archival document."
   },
   "law_of_armed_conflict": {
@@ -59,6 +69,11 @@
       "en": "https://avalon.law.yale.edu/20th_century/geneva07.asp",
       "ar": "https://avalon.law.yale.edu/20th_century/geneva07.asp"
     },
+    "alternate_sources": [
+      "https://avalon.law.yale.edu/20th_century/geneva07.asp",
+      "https://ihl-databases.icrc.org/en/ihl-treaties/gciv-1949/article-28",
+      "https://www.idf.il/en/mini-sites/hamas-israel-war-24/all-articles/hamas-use-of-human-shields/"
+    ],
     "description": "Geneva Convention IV Article 28 - Prohibition of using civilians as human shields to shield military operations."
   },
   "hostages": {
@@ -76,6 +91,11 @@
       "en": "https://www.ajc.org/news/what-is-known-about-israeli-hostages-taken-by-hamas",
       "ar": "https://www.ajc.org/news/what-is-known-about-israeli-hostages-taken-by-hamas"
     },
+    "alternate_sources": [
+      "https://www.ajc.org/news/what-is-known-about-israeli-hostages-taken-by-hamas",
+      "https://stories.bringthemhomenow.net/",
+      "https://www.gov.il/en/pages/swords-of-iron-hagen-citizens"
+    ],
     "description": "Comprehensive verified tracker, timeline, and profiles of hostages taken on October 7."
   }
 }
