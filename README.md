@@ -118,3 +118,49 @@ Fill in your credentials:
   ```powershell
   pytest -v
   ```
+
+
+---
+
+## Community Telegram Mode
+
+zioX can serve a community of subscribers. A single dedicated **scout X account** scans for viral posts; each subscriber receives a unique, fact-checked reply draft in Telegram with a one-tap **X Web Intent** button and publishes it from their own account. The bot never posts to X on its own while `TELEGRAM_REVIEW_ENABLED=true`.
+
+**Pipeline:** Discovery Radar (Boolean OR queries, `min_faves` filter, Gaussian jitter, circuit breaker) -> Gemini grounding (batch reply variations) -> Humanizer (link / no-link mix) -> sharded dispatch to eligible subscribers.
+
+**Subscriber commands:** `/start`, `/ready`, `/stop`, `/style`, `/lang <en|ar|both>`, `/limit <n>`, `/quota`. New subscribers must confirm readiness, and are auto-paused after `MAX_UNCONFIRMED_DISPATCHES` cards in a row without pressing the "I replied" button.
+
+### Running Live with Turso (Cloud Database)
+
+1. Create the database:
+   ```bash
+   turso db create ziox
+   turso db show ziox --url        # TURSO_DATABASE_URL
+   turso db tokens create ziox     # TURSO_AUTH_TOKEN
+   ```
+2. Fill `.env` (see `.env.example`): `TURSO_*`, `TWITTER_PROVIDER=twikit`, `X_AUTH_TOKEN`, `X_CT0` (scout account), `GEMINI_API_KEY`, `TELEGRAM_*`, `TELEGRAM_REVIEW_ENABLED=true`, `DRY_RUN=false`. When `TURSO_DATABASE_URL` is set, Turso is used instead of the local SQLite file; schema and migrations are applied automatically.
+3. Verify and run:
+   ```powershell
+   .\.venv\Scripts\python.exe main.py --status                    # confirms active DB
+   .\.venv\Scripts\python.exe main.py --radar --min-faves 20      # scan only
+   .\.venv\Scripts\python.exe main.py --pipeline --live           # full pipeline once
+   .\.venv\Scripts\python.exe main.py --poll-telegram --poll-interval 10   # real-time commands daemon
+   ```
+
+### Scheduled Runs on GitHub Actions
+
+`.github/workflows/ziox_cron.yml` runs `main.py --pipeline --live` every 4 hours. Add these repository secrets: `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `GEMINI_API_KEY`, `X_AUTH_TOKEN`, `X_CT0`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and `TWITTER_PROVIDER=twikit` (the workflow defaults to `mock`, which scans nothing).
+
+> Actions only runs during the cron window, so Telegram commands are processed once per run. For real-time responses run `--poll-telegram` on a persistent host.
+
+### Scanner Safety Notes
+
+- Use a **dedicated scout X account**. `twikit` is unofficial session automation and may be restricted by X.
+- Jitter (`START_JITTER_MAX_MINUTES`, `MIN/MAX_SEARCH_DELAY_SECONDS`) hides robotic timing but is a secondary defense. The primary defenses are the scout account, few requests (Boolean OR consolidation), and the circuit breaker, which quarantines the scanner for `SCANNER_COOLDOWN_MINUTES` after a 401/403/429.
+- GitHub Actions runs from datacenter IPs. On a private repo, long start jitter consumes billable minutes.
+
+## Documentation Map
+
+- `openspec/specs/`: source-of-truth capability specifications.
+- `openspec/changes/archive/`: completed change proposals, designs, and tasks.
+- `.serena/memories/`: condensed architecture notes for AI agents.
