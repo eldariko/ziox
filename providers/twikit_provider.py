@@ -89,7 +89,7 @@ def _apply_twikit_patches():
                 legacy.setdefault('withheld_in_countries', [])
                 if 'entities' in legacy and isinstance(legacy['entities'], dict):
                     legacy['entities'].setdefault('description', {}).setdefault('urls', [])
-            orig_guest_init(self, client, data)
+            orig_user_init(self, client, data)
         twikit.guest.user.User.__init__ = safe_guest_init
     except Exception as e:
         logger.warning(f"Could not apply Twikit compatibility patch: {e}")
@@ -238,7 +238,10 @@ class TwikitTwitterProvider(BaseTwitterProvider):
     def search_recent_tweets(self, query: str, limit: int = 10) -> List[Tweet]:
         """Search top recent tweets matching query on X."""
         try:
-            results = _run_coro(self.client.search_tweet(query, product="Top", count=limit))
+            # Query "Latest" first to find fresh tweets from the current day/hours rather than stale historical posts
+            results = _run_coro(self.client.search_tweet(query, product="Latest", count=limit))
+            if not results:
+                results = _run_coro(self.client.search_tweet(query, product="Top", count=limit))
             tweets: List[Tweet] = []
             for raw_tweet in results:
                 author = "unknown"

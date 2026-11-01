@@ -77,7 +77,8 @@ class DiscoveryRadar:
     def build_consolidated_queries(
         cls,
         keywords: List[str],
-        max_per_query: int = 6
+        max_per_query: int = 6,
+        min_faves: int = 0,
     ) -> List[str]:
         """
         Consolidate search keywords into script-grouped (English/Latin vs. Arabic)
@@ -89,8 +90,9 @@ class DiscoveryRadar:
                '("إسرائيل" OR "مساعدات غزة")'
              ]
         """
+        suffix = f" min_faves:{min_faves}" if min_faves > 0 else ""
         if max_per_query <= 1:
-            return [k.strip() for k in keywords if k.strip()]
+            return [f"{k.strip()}{suffix}" for k in keywords if k.strip()]
 
         latin_terms: List[str] = []
         arabic_terms: List[str] = []
@@ -109,10 +111,10 @@ class DiscoveryRadar:
             for i in range(0, len(group), max_per_query):
                 chunk = group[i:i + max_per_query]
                 if len(chunk) == 1:
-                    queries.append(cls._format_keyword_for_or(chunk[0]))
+                    queries.append(f"{cls._format_keyword_for_or(chunk[0])}{suffix}")
                 elif chunk:
                     joined = " OR ".join(cls._format_keyword_for_or(t) for t in chunk)
-                    queries.append(f"({joined})")
+                    queries.append(f"({joined}){suffix}")
 
         return queries
 
@@ -177,6 +179,7 @@ class DiscoveryRadar:
         max_search_delay_seconds: float = 15.0,
         dry_run: bool = True,
         on_circuit_breaker: Optional[Callable[[ScannerCircuitBreakerError], None]] = None,
+        min_faves: int = 0,
     ) -> List[Dict[str, Any]]:
         """
         Scan recent posts across search keywords using a provider,
@@ -191,9 +194,9 @@ class DiscoveryRadar:
         enqueued_items: List[Dict[str, Any]] = []
 
         queries_to_run = (
-            self.build_consolidated_queries(keywords, max_per_query=max_keywords_per_query)
+            self.build_consolidated_queries(keywords, max_per_query=max_keywords_per_query, min_faves=min_faves)
             if combine_queries
-            else [k.strip() for k in keywords if k.strip()]
+            else [f"{k.strip()} min_faves:{min_faves}" if min_faves > 0 else k.strip() for k in keywords if k.strip()]
         )
 
         for idx, query_str in enumerate(queries_to_run):
