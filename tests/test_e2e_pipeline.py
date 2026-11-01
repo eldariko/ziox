@@ -311,3 +311,180 @@ def test_e2e_community_saas_variation_sharding_and_scanner_cooldown(tmp_path):
     cooldown_until = repo.get_state("scanner_cooldown_until")
     assert cooldown_until is not None
     assert mock_telegram.send_admin_alert.called
+
+
+def test_e2e_scale_multi_wave_cohort_sharding_and_language_routing(tmp_path):
+    """
+    Simulates scaling to a large community with horizontal cohort sharding across multiple waves:
+    - 35 English/both subscribers + 5 Arabic-only subscribers = 40 active subscribers.
+    - `target_cohort_size_per_tweet = 20`, `no_link_variation_ratio = 0.4`.
+    - Wave 1:
+      * English tweet `viral_aid_101` serves the first 20 eligible subscribers with 20 unique variations
+        (mixing 60% linked and 40% linkless replies) and transitions to `DISPATCHED_WAVE`.
+      * Arabic tweet `viral_ar_201` routes only to Arabic/both subscribers.
+    - Wave 2:
+      * Running `process_queue` again picks up `viral_aid_101` (`DISPATCHED_WAVE`), generates a fresh batch
+        for the remaining 15 English/both subscribers, serves all 35 without a single duplicate hash,
+        and transitions `viral_aid_101` to `DISPATCHED_TELEGRAM`.
+    """
+    from engine.telegram_dispatcher import TelegramDispatcher
+
+    db_file = str(tmp_path / "e2e_scale_waves.db")
+    repo = Repository(db_file)
+    settings = Settings(
+        database_path=db_file,
+        dry_run=False,
+        virality_threshold=5.0,
+        monthly_max_replies=100,
+        telegram_bot_token="123456:TEST_TOKEN",
+        telegram_chat_id="999000",
+        telegram_review_enabled=True,
+        target_cohort_size_per_tweet=20,
+        telegram_tweets_per_cycle=10,
+        no_link_variation_ratio=0.4,
+        max_variations_per_gemini_call=10,
+    )
+
+    styles = ["direct_data", "socratic", "historical", "empathetic", "sharp"]
+    # Register 30 English-only subscribers + 5 Both-language subscribers (= 35 eligible for English)
+    for i in range(30):
+        repo.upsert_subscriber(
+            chat_id=f"en_sub_{i}",
+            username=f"en_user_{i}",
+            preferred_style=styles[i % len(styles)],
+            preferred_lang="en",
+            ready_confirmed=True,
+        )
+    for i in range(5):
+        repo.upsert_subscriber(
+            chat_id=f"both_sub_{i}",
+            username=f"both_user_{i}",
+            preferred_style=styles[i % len(styles)],
+            preferred_lang="both",
+            ready_confirmed=True,
+        )
+    # Register 5 Arabic-only subscribers (should NOT receive English tweets, only Arabic tweets)
+    for i in range(5):
+        repo.upsert_subscriber(
+            chat_id=f"ar_sub_{i}",
+            username=f"ar_user_{i}",
+            preferred_style=styles[i % len(styles)],
+            preferred_lang="ar",
+            ready_confirmed=True,
+        )
+
+    # Enqueue 1 English viral tweet and 1 Arabic viral tweet
+    repo.save_processed_tweet(
+        tweet_id="viral_aid_101",
+        author_handle="hostile_en",
+        tweet_text="BREAKING: Israel has completely blocked all food and aid trucks into Gaza!",
+        virality_score=95.0,
+        was_published=False,
+        status="DISCOVERED",
+    )
+    repo.save_processed_tweet(
+        tweet_id="viral_ar_201",
+        author_handle="hostile_ar",
+        tweet_text="عاجل: إسرائيل تمنع دخول جميع شاحنات المساعدات الإنسانية والغذاء إلى غزة بالكامل!",
+        virality_score=88.0,
+        was_published=False,
+        status="DISCOVERED",
+    )
+
+    provider = SimulatedTwitterProvider()
+    batch_call_counter = {"count": 0}
+
+    mock_grounding = MagicMock(spec=GroundingEngine)
+    def fake_generate_batch(tweet_text, author_handle, total_variations=10, max_per_call=10):
+        batch_call_counter["count"] += 1
+        call_idx = batch_call_counter["count"]
+        is_ar = any("\u0600" <= c <= "\u06ff" for c in tweet_text)
+        vars_list = []
+        for idx in range(total_variations):
+            st = styles[idx % len(styles)]
+            if is_ar:
+                txt = f"بيانات رسمية ({call_idx}-{idx}): دخلت أكثر من 30,000 شاحنة مساعدات عبر المعابر."
+            else:
+                txt = f"Verified crossing record #{call_idx}-{idx}: Over 30,000 inspected aid trucks entered Gaza."
+            vars_list.append(DraftVariation(style=st, text=txt))
+        return FactCheckResult(
+            is_worth_replying=True,
+            claim_identified="False aid blockade claim",
+            verified_facts=["30,000+ aid trucks entered Gaza"],
+            recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/",
+            draft_reply=vars_list[0].text,
+            draft_variations=vars_list,
+        )
+
+    mock_grounding.generate_variations_batch.side_effect = fake_generate_batch
+    mock_grounding.evaluate_and_draft.side_effect = lambda text, author: fake_generate_batch(text, author, total_variations=10)
+
+    real_dispatcher = TelegramDispatcher(bot_token="123456:TEST_TOKEN", chat_ids="999000")
+    mock_http = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status.return_value = None
+    sent_messages = []
+    def capture_post(url, json=None, **kwargs):
+        if json and "chat_id" in json and "text" in json:
+            sent_messages.append(json)
+        return mock_resp
+    mock_http.post.side_effect = capture_post
+
+    mock_telegram = MagicMock()
+    mock_telegram.is_configured.return_value = True
+    mock_telegram.sync_subscribers.return_value = 0
+    mock_telegram.dispatch_variations_to_subscribers.side_effect = (
+        lambda **kwargs: real_dispatcher.dispatch_variations_to_subscribers(**kwargs, http_client=mock_http)
+    )
+
+    orchestrator = BotOrchestrator(
+        settings=settings,
+        repository=repo,
+        provider=provider,
+        grounding_engine=mock_grounding,
+        telegram_dispatcher=mock_telegram,
+    )
+
+    # --- WAVE 1 ---
+    report_w1 = orchestrator.process_queue(interactive=False, limit=10)
+    assert report_w1["status"] == "SUCCESS"
+    assert report_w1["processed"] == 2
+
+    # Check viral_aid_101 after Wave 1: 20 subscribers served, 15 remaining -> DISPATCHED_WAVE
+    hashes_en_w1 = repo.get_used_variation_hashes("viral_aid_101")
+    assert len(hashes_en_w1) == 20
+    assert len(set(hashes_en_w1)) == 20
+
+    # Check viral_ar_201 after Wave 1: 5 ar_sub + 5 both_sub = 10 eligible subscribers served -> DISPATCHED_TELEGRAM
+    hashes_ar_w1 = repo.get_used_variation_hashes("viral_ar_201")
+    assert len(hashes_ar_w1) == 10
+    assert len(set(hashes_ar_w1)) == 10
+
+    with repo._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM processed_tweets WHERE tweet_id = 'viral_aid_101'")
+        assert cursor.fetchone()["status"] == "DISPATCHED_WAVE"
+        cursor.execute("SELECT status FROM processed_tweets WHERE tweet_id = 'viral_ar_201'")
+        assert cursor.fetchone()["status"] == "DISPATCHED_TELEGRAM"
+
+    # Verify Arabic-only subscribers NEVER received the English tweet
+    with repo._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT chat_id FROM dispatches WHERE tweet_id = 'viral_aid_101'")
+        en_recipients_w1 = {r["chat_id"] for r in cursor.fetchall()}
+        assert all(not cid.startswith("ar_sub_") for cid in en_recipients_w1)
+
+    # --- WAVE 2 ---
+    # Running process_queue again should pick up viral_aid_101 (DISPATCHED_WAVE) and serve the remaining 15 subscribers
+    report_w2 = orchestrator.process_queue(interactive=False, limit=10)
+    assert report_w2["status"] == "SUCCESS"
+    assert report_w2["processed"] == 1
+
+    hashes_en_total = repo.get_used_variation_hashes("viral_aid_101")
+    assert len(hashes_en_total) == 35
+    assert len(set(hashes_en_total)) == 35  # 100% unique across all 35 subscribers!
+
+    with repo._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM processed_tweets WHERE tweet_id = 'viral_aid_101'")
+        assert cursor.fetchone()["status"] == "DISPATCHED_TELEGRAM"

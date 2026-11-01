@@ -1,8 +1,8 @@
 """
 Telegram Review & Web Intent Dispatcher.
 Dispatches grounded reply drafts with native one-tap X Web Intent buttons,
-serverless subscriber onboarding via getUpdates, per-subscriber variation sharding,
-and admin-only technical alerts.
+serverless subscriber onboarding via paginated getUpdates, readiness & action confirmation,
+language/quota commands, per-subscriber variation sharding, and admin-only technical alerts.
 """
 
 import html
@@ -14,6 +14,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 VALID_STYLES = {"any", "factual", "sharp", "historical_legal", "rhetorical_question"}
+VALID_LANGS = {"en", "ar", "both"}
 
 
 def build_x_web_intent_url(tweet_id: str, reply_text: str) -> str:
@@ -30,7 +31,8 @@ class TelegramDispatcher:
     """
     Lightweight dispatcher to send fact-checked draft cards to Telegram
     with one-tap X Web Intent approval buttons, manage serverless community
-    subscribers (/start, /stop, /style), and dispatch admin-only health alerts.
+    subscribers (/start, /ready, /stop, /style, /lang, /limit, /quota + callback queries),
+    and dispatch admin-only health alerts.
     """
 
     def __init__(self, bot_token: Optional[str] = None, chat_ids: Optional[str] = None):
@@ -45,6 +47,11 @@ class TelegramDispatcher:
         )
         self.updates_url = (
             f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
+            if self.bot_token
+            else None
+        )
+        self.callback_url = (
+            f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery"
             if self.bot_token
             else None
         )
@@ -65,13 +72,19 @@ class TelegramDispatcher:
         text_html: str,
         reply_markup: Optional[Dict[str, Any]] = None,
         http_client: Optional[httpx.Client] = None,
+        repository: Optional[Any] = None,
     ) -> bool:
-        """Send an HTML message to a single Telegram chat_id."""
+        """
+        Send an HTML message to a single Telegram chat_id.
+        If Telegram returns HTTP 403 Forbidden (bot blocked by user) and `repository` is provided,
+        immediately marks the subscriber as `active = 0`.
+        """
         if not self.api_url:
             return False
 
+        clean_chat_id = str(chat_id).strip()
         payload: Dict[str, Any] = {
-            "chat_id": str(chat_id).strip(),
+            "chat_id": clean_chat_id,
             "text": text_html,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
@@ -82,10 +95,43 @@ class TelegramDispatcher:
         def _post(client: httpx.Client) -> bool:
             try:
                 resp = client.post(self.api_url, json=payload)
+                if resp.status_code == 403 and repository is not None and hasattr(repository, "deactivate_subscriber"):
+                    logger.warning(
+                        f"[TelegramDispatcher] Chat {clean_chat_id} returned 403 Forbidden (bot blocked). Deactivating subscriber."
+                    )
+                    repository.deactivate_subscriber(clean_chat_id)
+                    return False
                 resp.raise_for_status()
                 return True
             except Exception as e:
-                logger.error(f"[TelegramDispatcher] Failed sending message to {chat_id}: {e}")
+                logger.error(f"[TelegramDispatcher] Failed sending message to {clean_chat_id}: {e}")
+                return False
+
+        if http_client is not None:
+            return _post(http_client)
+        with httpx.Client(timeout=10.0) as client:
+            return _post(client)
+
+    def _answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: str = "",
+        http_client: Optional[httpx.Client] = None,
+    ) -> bool:
+        """Acknowledge an inline keyboard button press via Telegram's `answerCallbackQuery`."""
+        if not self.callback_url or not callback_query_id:
+            return False
+        payload: Dict[str, Any] = {"callback_query_id": str(callback_query_id)}
+        if text:
+            payload["text"] = text
+
+        def _post(client: httpx.Client) -> bool:
+            try:
+                resp = client.post(self.callback_url, json=payload)
+                resp.raise_for_status()
+                return True
+            except Exception as e:
+                logger.debug(f"[TelegramDispatcher] answerCallbackQuery skipped/failed: {e}")
                 return False
 
         if http_client is not None:
@@ -97,17 +143,28 @@ class TelegramDispatcher:
         self,
         repository: Any,
         default_daily_limit: int = 3,
+        max_user_daily_limit: int = 5,
+        require_readiness_confirm: bool = False,
         http_client: Optional[httpx.Client] = None,
     ) -> Dict[str, int]:
         """
-        Serverless Telegram onboarding:
+        Serverless Telegram onboarding & engagement synchronization:
         1. Seeds static operator `self.chat_ids` (from `.env` `TELEGRAM_CHAT_ID`) into `subscribers`
-           with `tier='admin'` and `daily_limit=100` so existing setups work seamlessly.
-        2. Polls Telegram `getUpdates` using the persisted `telegram_last_update_id` cursor.
-        3. Processes `/start`, `/stop`, and `/style <style>` commands, updating `subscribers`
-           and immediately sending a confirmation message back to the user.
+           with `tier='admin'`, `ready_confirmed=True`, and `daily_limit=100`.
+        2. Polls Telegram `getUpdates` in a paginated loop using `telegram_last_update_id` until
+           all pending updates (100+ across large communities) are processed.
+        3. Processes commands (`/start`, `/ready`, `/stop`, `/style`, `/lang`, `/limit`, `/quota`)
+           and inline button `callback_query` events (`ready:confirm` and `ack:<tweet_id>`).
         """
-        summary = {"started": 0, "stopped": 0, "style_updated": 0}
+        summary = {
+            "started": 0,
+            "stopped": 0,
+            "style_updated": 0,
+            "lang_updated": 0,
+            "limit_updated": 0,
+            "ready_confirmed": 0,
+            "replies_confirmed": 0,
+        }
 
         # 1. Ensure operator chat_ids from .env are seeded as admin subscribers
         for admin_cid in self.chat_ids:
@@ -120,6 +177,8 @@ class TelegramDispatcher:
                         tier="admin",
                         daily_limit=100,
                         preferred_style="any",
+                        preferred_lang="both",
+                        ready_confirmed=True,
                         active=True,
                     )
             except Exception as e:
@@ -129,106 +188,301 @@ class TelegramDispatcher:
             return summary
 
         last_update_str = repository.get_state("telegram_last_update_id")
-        params: Dict[str, Any] = {"timeout": 0}
+        current_offset: Optional[int] = None
         if last_update_str is not None and str(last_update_str).isdigit():
-            params["offset"] = int(last_update_str) + 1
+            current_offset = int(last_update_str) + 1
 
         def _poll_and_process(client: httpx.Client) -> Dict[str, int]:
-            try:
-                resp = client.get(self.updates_url, params=params)
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception as e:
-                logger.error(f"[TelegramDispatcher] Failed polling getUpdates: {e}")
-                return summary
+            nonlocal current_offset
+            max_pages = 20  # Up to 2,000 updates per cycle safety cap
+            pages_fetched = 0
 
-            if not data.get("ok"):
-                return summary
+            while pages_fetched < max_pages:
+                pages_fetched += 1
+                params: Dict[str, Any] = {"timeout": 0, "limit": 100}
+                if current_offset is not None:
+                    params["offset"] = current_offset
 
-            updates = data.get("result") or []
-            max_update_id: Optional[int] = None
+                try:
+                    resp = client.get(self.updates_url, params=params)
+                    resp.raise_for_status()
+                    data = resp.json()
+                except Exception as e:
+                    logger.error(f"[TelegramDispatcher] Failed polling getUpdates: {e}")
+                    break
 
-            for upd in updates:
-                upd_id = upd.get("update_id")
-                if isinstance(upd_id, int):
-                    if max_update_id is None or upd_id > max_update_id:
-                        max_update_id = upd_id
+                if not data.get("ok"):
+                    break
 
-                msg = upd.get("message") or upd.get("edited_message")
-                if not isinstance(msg, dict):
-                    continue
+                updates = data.get("result") or []
+                if not updates:
+                    break
 
-                chat = msg.get("chat") or {}
-                chat_id = str(chat.get("id", "")).strip()
-                if not chat_id:
-                    continue
+                max_update_id: Optional[int] = None
 
-                username = (
-                    chat.get("username")
-                    or (msg.get("from") or {}).get("username")
-                    or chat.get("first_name")
-                    or ""
-                )
-                text = (msg.get("text") or "").strip()
-                if not text:
-                    continue
+                for upd in updates:
+                    upd_id = upd.get("update_id")
+                    if isinstance(upd_id, int):
+                        if max_update_id is None or upd_id > max_update_id:
+                            max_update_id = upd_id
 
-                lower_text = text.lower()
-                if lower_text.startswith("/start"):
-                    tier = "admin" if chat_id in self.chat_ids else "free"
-                    limit = 100 if tier == "admin" else default_daily_limit
-                    repository.upsert_subscriber(
-                        chat_id=chat_id,
-                        username=str(username),
-                        tier=tier,
-                        daily_limit=limit,
-                        preferred_style="any",
-                        active=True,
+                    # A. Handle Inline Button Callback Queries (ready:confirm / ack:<tweet_id>)
+                    cb = upd.get("callback_query")
+                    if isinstance(cb, dict):
+                        cb_id = str(cb.get("id", "")).strip()
+                        cb_data = str(cb.get("data", "")).strip()
+                        cb_msg = cb.get("message") or {}
+                        cb_chat = cb_msg.get("chat") or (cb.get("from") or {})
+                        cb_chat_id = str(cb_chat.get("id", "")).strip()
+                        if cb_chat_id:
+                            if cb_data == "ready:confirm":
+                                if hasattr(repository, "confirm_subscriber_ready"):
+                                    repository.confirm_subscriber_ready(cb_chat_id)
+                                summary["ready_confirmed"] += 1
+                                self._answer_callback_query(
+                                    cb_id,
+                                    text="✅ מוכנותך אושרה! תקבל פוסטים בסבב הקרוב.",
+                                    http_client=client,
+                                )
+                                ready_html = (
+                                    "🚀 <b>מעולה! החשבון שלך פעיל ומוכן לקבלת פוסטים.</b>\n"
+                                    "בכל פעם שתקבל פוסט ותגיב עליו ב-X, לחץ על הכפתור <b>✅ הגבתי ב-X</b> בכרטיס כדי להמשיך לקבל פוסטים."
+                                )
+                                self._send_direct_message(
+                                    chat_id=cb_chat_id,
+                                    text_html=ready_html,
+                                    http_client=client,
+                                    repository=repository,
+                                )
+                            elif cb_data.startswith("ack:"):
+                                ack_tweet_id = cb_data.split(":", 1)[1].strip()
+                                if ack_tweet_id and hasattr(repository, "confirm_dispatch_replied"):
+                                    repository.confirm_dispatch_replied(ack_tweet_id, cb_chat_id)
+                                summary["replies_confirmed"] += 1
+                                self._answer_callback_query(
+                                    cb_id,
+                                    text="👏 תודה! התגובה שלך נרשמה.",
+                                    http_client=client,
+                                )
+                        continue
+
+                    # B. Handle Standard Text Commands
+                    msg = upd.get("message") or upd.get("edited_message")
+                    if not isinstance(msg, dict):
+                        continue
+
+                    chat = msg.get("chat") or {}
+                    chat_id = str(chat.get("id", "")).strip()
+                    if not chat_id:
+                        continue
+
+                    username = (
+                        chat.get("username")
+                        or (msg.get("from") or {}).get("username")
+                        or chat.get("first_name")
+                        or ""
                     )
-                    summary["started"] += 1
-                    welcome_html = (
-                        "✅ <b>נרשמת בהצלחה ל-zioX!</b>\n"
-                        "בסבב הסריקה הבא תקבל לכאן הצעות תגובה ייחודיות מבוססות מקורות מאומתים בלחיצה אחת.\n\n"
-                        "🎨 <b>בחירת סגנון אישי:</b> שלח <code>/style sharp</code>, <code>/style factual</code>, "
-                        "<code>/style historical_legal</code>, או <code>/style rhetorical_question</code>.\n"
-                        "🛑 להפסקה בכל עת שלח <code>/stop</code>."
-                    )
-                    self._send_direct_message(chat_id=chat_id, text_html=welcome_html, http_client=client)
+                    text = (msg.get("text") or "").strip()
+                    if not text:
+                        continue
 
-                elif lower_text.startswith("/stop"):
-                    repository.deactivate_subscriber(chat_id)
-                    summary["stopped"] += 1
-                    stop_html = "🛑 <b>המנוי שלך ב-zioX הושהה.</b> תוכל לחזור בכל עת באמצעות שליחת <code>/start</code>."
-                    self._send_direct_message(chat_id=chat_id, text_html=stop_html, http_client=client)
-
-                elif lower_text.startswith("/style"):
-                    parts = lower_text.split()
-                    requested_style = parts[1].strip() if len(parts) > 1 else ""
-                    if requested_style in VALID_STYLES:
+                    lower_text = text.lower()
+                    if lower_text.startswith("/start"):
+                        tier = "admin" if chat_id in self.chat_ids else "free"
+                        limit = 100 if tier == "admin" else default_daily_limit
+                        is_ready = True if tier == "admin" else (not require_readiness_confirm)
                         repository.upsert_subscriber(
                             chat_id=chat_id,
                             username=str(username),
-                            tier="admin" if chat_id in self.chat_ids else "free",
-                            daily_limit=100 if chat_id in self.chat_ids else default_daily_limit,
-                            preferred_style=requested_style,
+                            tier=tier,
+                            daily_limit=limit,
+                            preferred_style="any",
+                            preferred_lang="both",
+                            ready_confirmed=is_ready,
                             active=True,
                         )
-                        repository.update_subscriber_style(chat_id, requested_style)
-                        summary["style_updated"] += 1
-                        style_html = (
-                            f"🎨 <b>סגנון התגובות שלך עודכן ל-<code>{html.escape(requested_style)}</code>!</b>\n"
-                            "בסבבים הבאים נתעדף עבורך וריאציות בסגנון זה."
+                        summary["started"] += 1
+                        welcome_html = (
+                            "✅ <b>נרשמת בהצלחה ל-zioX!</b>\n"
+                            "בסבב הסריקה הבא תקבל לכאן הצעות תגובה ייחודיות מבוססות מקורות מאומתים בלחיצה אחת.\n\n"
+                            "🎨 <b>בחירת סגנון אישי:</b> שלח <code>/style sharp</code>, <code>/style factual</code>, "
+                            "<code>/style historical_legal</code>, או <code>/style rhetorical_question</code>.\n"
+                            "🌐 <b>בחירת שפה:</b> שלח <code>/lang en</code>, <code>/lang ar</code>, או <code>/lang both</code>.\n"
+                            "📊 <b>מכסה יומית:</b> שלח <code>/limit 3</code> לעדכון כמות יומית או <code>/quota</code> לבדיקת מצב.\n"
+                            "✋ <b>וידוא פעילות:</b> לחץ על הכפתור למטה (או שלח <code>/ready</code>) כדי לאשר שאתה מוכן להגיב!\n"
+                            "🛑 להפסקה בכל עת שלח <code>/stop</code>."
                         )
-                    else:
-                        valid_list = ", ".join(sorted(VALID_STYLES))
-                        style_html = (
-                            f"ℹ️ <b>בחירת סגנון תגובה ב-zioX:</b>\n"
-                            f"שלח <code>/style &lt;name&gt;</code> עם אחת האפשרויות: <code>{valid_list}</code>"
+                        ready_markup = {
+                            "inline_keyboard": [
+                                [{"text": "✅ אני מוכן להגיב", "callback_data": "ready:confirm"}]
+                            ]
+                        }
+                        self._send_direct_message(
+                            chat_id=chat_id,
+                            text_html=welcome_html,
+                            reply_markup=ready_markup,
+                            http_client=client,
+                            repository=repository,
                         )
-                    self._send_direct_message(chat_id=chat_id, text_html=style_html, http_client=client)
 
-            if max_update_id is not None:
-                repository.set_state("telegram_last_update_id", str(max_update_id))
+                    elif lower_text.startswith("/ready"):
+                        if hasattr(repository, "confirm_subscriber_ready"):
+                            repository.confirm_subscriber_ready(chat_id)
+                        summary["ready_confirmed"] += 1
+                        ready_html = (
+                            "🚀 <b>מוכנותך אושרה!</b> החשבון שלך פעיל ויקבל פוסטים בסבב הקרוב.\n"
+                            "זכור ללחוץ על <b>✅ הגבתי ב-X</b> לאחר פרסום תגובה."
+                        )
+                        self._send_direct_message(
+                            chat_id=chat_id,
+                            text_html=ready_html,
+                            http_client=client,
+                            repository=repository,
+                        )
+
+                    elif lower_text.startswith("/stop"):
+                        repository.deactivate_subscriber(chat_id)
+                        summary["stopped"] += 1
+                        stop_html = "🛑 <b>המנוי שלך ב-zioX הושהה.</b> תוכל לחזור בכל עת באמצעות שליחת <code>/start</code> או <code>/ready</code>."
+                        self._send_direct_message(
+                            chat_id=chat_id,
+                            text_html=stop_html,
+                            http_client=client,
+                            repository=repository,
+                        )
+
+                    elif lower_text.startswith("/style"):
+                        parts = lower_text.split()
+                        requested_style = parts[1].strip() if len(parts) > 1 else ""
+                        if requested_style in VALID_STYLES:
+                            if hasattr(repository, "get_subscriber") and repository.get_subscriber(chat_id) is None:
+                                repository.upsert_subscriber(
+                                    chat_id=chat_id,
+                                    username=str(username),
+                                    tier="admin" if chat_id in self.chat_ids else "free",
+                                    daily_limit=100 if chat_id in self.chat_ids else default_daily_limit,
+                                    preferred_style=requested_style,
+                                    active=True,
+                                )
+                            repository.update_subscriber_style(chat_id, requested_style)
+                            summary["style_updated"] += 1
+                            style_html = (
+                                f"🎨 <b>סגנון התגובות שלך עודכן ל-<code>{html.escape(requested_style)}</code>!</b>\n"
+                                "בסבבים הבאים נתעדף עבורך וריאציות בסגנון זה."
+                            )
+                        else:
+                            valid_list = ", ".join(sorted(VALID_STYLES))
+                            style_html = (
+                                f"ℹ️ <b>בחירת סגנון תגובה ב-zioX:</b>\n"
+                                f"שלח <code>/style &lt;name&gt;</code> עם אחת האפשרויות: <code>{valid_list}</code>"
+                            )
+                        self._send_direct_message(
+                            chat_id=chat_id,
+                            text_html=style_html,
+                            http_client=client,
+                            repository=repository,
+                        )
+
+                    elif lower_text.startswith("/lang"):
+                        parts = lower_text.split()
+                        requested_lang = parts[1].strip() if len(parts) > 1 else ""
+                        if requested_lang in VALID_LANGS:
+                            if hasattr(repository, "get_subscriber") and repository.get_subscriber(chat_id) is None:
+                                repository.upsert_subscriber(
+                                    chat_id=chat_id,
+                                    username=str(username),
+                                    preferred_lang=requested_lang,
+                                    active=True,
+                                )
+                            if hasattr(repository, "update_subscriber_language"):
+                                repository.update_subscriber_language(chat_id, requested_lang)
+                            summary["lang_updated"] += 1
+                            lang_html = (
+                                f"🌐 <b>שפת הפוסטים שלך עודכנה ל-<code>{html.escape(requested_lang)}</code>!</b>"
+                            )
+                        else:
+                            lang_html = (
+                                "ℹ️ <b>בחירת שפת פוסטים ב-zioX:</b>\n"
+                                "שלח <code>/lang en</code> (אנגלית בלבד), <code>/lang ar</code> (ערבית בלבד), או <code>/lang both</code> (שתי השפות)."
+                            )
+                        self._send_direct_message(
+                            chat_id=chat_id,
+                            text_html=lang_html,
+                            http_client=client,
+                            repository=repository,
+                        )
+
+                    elif lower_text.startswith("/limit"):
+                        parts = lower_text.split()
+                        arg_num = parts[1].strip() if len(parts) > 1 else ""
+                        if arg_num.isdigit() and int(arg_num) >= 1:
+                            req_val = int(arg_num)
+                            if hasattr(repository, "get_subscriber") and repository.get_subscriber(chat_id) is None:
+                                repository.upsert_subscriber(
+                                    chat_id=chat_id,
+                                    username=str(username),
+                                    daily_limit=min(req_val, max_user_daily_limit),
+                                    active=True,
+                                )
+                            effective_limit = (
+                                repository.update_subscriber_daily_limit(
+                                    chat_id,
+                                    requested_limit=req_val,
+                                    max_ceiling=max_user_daily_limit,
+                                )
+                                if hasattr(repository, "update_subscriber_daily_limit")
+                                else min(req_val, max_user_daily_limit)
+                            )
+                            summary["limit_updated"] += 1
+                            if effective_limit < req_val:
+                                limit_html = (
+                                    f"📊 <b>המכסה היומית שלך עודכנה ל-<code>{effective_limit}</code> פוסטים ביום</b> "
+                                    f"(התקרה המרכזית המותרת למנוי שלך היא {effective_limit})."
+                                )
+                            else:
+                                limit_html = (
+                                    f"📊 <b>המכסה היומית שלך עודכנה ל-<code>{effective_limit}</code> פוסטים ביום!</b>"
+                                )
+                        else:
+                            limit_html = (
+                                f"ℹ️ <b>עדכון מכסה יומית:</b> שלח <code>/limit &lt;1-{max_user_daily_limit}&gt;</code> "
+                                f"(לדוגמה: <code>/limit 4</code>)."
+                            )
+                        self._send_direct_message(
+                            chat_id=chat_id,
+                            text_html=limit_html,
+                            http_client=client,
+                            repository=repository,
+                        )
+
+                    elif lower_text.startswith("/quota"):
+                        sub_info = repository.get_subscriber(chat_id) if hasattr(repository, "get_subscriber") else None
+                        today_used = repository.get_subscriber_daily_count(chat_id) if hasattr(repository, "get_subscriber_daily_count") else 0
+                        d_limit = int(sub_info.get("daily_limit", default_daily_limit)) if sub_info else default_daily_limit
+                        p_style = (sub_info.get("preferred_style") if sub_info else "any") or "any"
+                        p_lang = (sub_info.get("preferred_lang") if sub_info else "both") or "both"
+                        total_conf = int(sub_info.get("total_confirmed_replies", 0)) if sub_info else 0
+                        quota_html = (
+                            "📊 <b>סטטוס המנוי שלך ב-zioX:</b>\n"
+                            f"• <b>פוסטים היום:</b> <code>{today_used} / {d_limit}</code>\n"
+                            f"• <b>תגובות שאושרו ב-X:</b> <code>{total_conf}</code>\n"
+                            f"• <b>סגנון מועדף:</b> <code>{html.escape(p_style)}</code>\n"
+                            f"• <b>שפה מועדפת:</b> <code>{html.escape(p_lang)}</code>"
+                        )
+                        self._send_direct_message(
+                            chat_id=chat_id,
+                            text_html=quota_html,
+                            http_client=client,
+                            repository=repository,
+                        )
+
+                if max_update_id is not None:
+                    repository.set_state("telegram_last_update_id", str(max_update_id))
+                    current_offset = max_update_id + 1
+
+                # If Telegram returned fewer than 100 items, no more pages are waiting
+                if len(updates) < 100:
+                    break
 
             return summary
 
@@ -327,10 +581,13 @@ class TelegramDispatcher:
         verified_facts: Optional[List[str]] = None,
         http_client: Optional[httpx.Client] = None,
         target_chat_ids: Optional[List[str]] = None,
+        include_ack_button: bool = False,
+        repository: Optional[Any] = None,
     ) -> bool:
         """
         Dispatches a review card to `target_chat_ids` (or all configured `self.chat_ids`)
-        with an Inline Keyboard button for one-tap X Web Intent.
+        with an Inline Keyboard button for one-tap X Web Intent, and optionally an action
+        confirmation button (`✅ הגבתי ב-X` / `ack:<tweet_id>`).
         """
         recipients = target_chat_ids if target_chat_ids is not None else self.chat_ids
         if not self.api_url or not recipients:
@@ -352,29 +609,42 @@ class TelegramDispatcher:
         author_clean = author_handle.lstrip("@")
         original_tweet_url = f"https://x.com/{author_clean}/status/{tweet_id}"
 
-        reply_markup = {
-            "inline_keyboard": [
-                [{"text": "🚀 צייץ תגובה ב-X", "url": intent_url}],
-                [{"text": "👀 צפה בציוץ המקורי", "url": original_tweet_url}],
-            ]
-        }
+        keyboard_rows = [
+            [{"text": "🚀 צייץ תגובה ב-X", "url": intent_url}],
+            [{"text": "👀 צפה בציוץ המקורי", "url": original_tweet_url}],
+        ]
+        if include_ack_button:
+            keyboard_rows.insert(
+                1,
+                [{"text": "✅ הגבתי ב-X", "callback_data": f"ack:{tweet_id}"}],
+            )
+
+        reply_markup = {"inline_keyboard": keyboard_rows}
 
         def _send(client: httpx.Client) -> bool:
             overall_success = True
             for chat_id in recipients:
+                clean_cid = str(chat_id).strip()
                 try:
                     payload = {
-                        "chat_id": chat_id,
+                        "chat_id": clean_cid,
                         "text": message_html,
                         "parse_mode": "HTML",
                         "reply_markup": reply_markup,
                         "disable_web_page_preview": True,
                     }
                     resp = client.post(self.api_url, json=payload)
+                    if resp.status_code == 403 and repository is not None and hasattr(repository, "deactivate_subscriber"):
+                        logger.warning(
+                            f"[TelegramDispatcher] Chat {clean_cid} returned 403 Forbidden (bot blocked). Deactivating subscriber."
+                        )
+                        repository.deactivate_subscriber(clean_cid)
+                        overall_success = False
+                        continue
                     resp.raise_for_status()
-                    logger.info(f"[TelegramDispatcher] Dispatched review card to chat {chat_id}")
+                    logger.info(f"[TelegramDispatcher] Dispatched review card to chat {clean_cid}")
                 except Exception as e:
-                    logger.error(f"[TelegramDispatcher] Failed to send to chat {chat_id}: {e}")
+                    logger.error(f"[TelegramDispatcher] Failed to send to chat {clean_cid}: {e}")
                     overall_success = False
             return overall_success
 
@@ -396,11 +666,17 @@ class TelegramDispatcher:
         claim_flagged: Optional[str] = None,
         verified_facts: Optional[List[str]] = None,
         http_client: Optional[httpx.Client] = None,
+        cohort_limit: int = 25,
+        max_unconfirmed: int = 5,
     ) -> int:
         """
-        Distribute unique reply variations for `tweet_id` across eligible active subscribers:
-        - Filters out subscribers who already received `tweet_id` or reached their daily_limit.
+        Distribute unique reply variations for `tweet_id` across a horizontal cohort of eligible subscribers:
+        - Auto-pauses any non-admin subscribers who have reached `max_unconfirmed` consecutive unconfirmed
+          dispatches and sends them a wake-up prompt (`🔔 חזרתי - שלח לי פוסטים`).
+        - Selects eligible subscribers in a single consolidated SQL query (`get_eligible_subscribers_for_tweet`)
+          matching the tweet's language (`en` or `ar`), readiness state, daily limit, and deduplication.
         - Matches each subscriber's `preferred_style` when available, otherwise assigns the next unused variation.
+        - Includes the `✅ הגבתי ב-X` (`ack:<tweet_id>`) inline confirmation button on every dispatched card.
         - Never assigns the same `variation_hash` to two different subscribers on the same `tweet_id`.
         - Records each successful delivery in the `dispatches` table.
         Returns the number of subscribers who received a unique variation.
@@ -408,21 +684,64 @@ class TelegramDispatcher:
         if not self.api_url or not variations:
             return 0
 
-        active_subscribers = repository.get_active_subscribers()
-        # Fallback: if no subscribers are in the DB yet but self.chat_ids is set, seed and fetch
-        if not active_subscribers and self.chat_ids:
-            for cid in self.chat_ids:
-                repository.upsert_subscriber(
-                    chat_id=cid,
-                    username="operator_admin",
-                    tier="admin",
-                    daily_limit=100,
-                    preferred_style="any",
-                    active=True,
+        # 1. Auto-pause subscribers who exceeded consecutive_unconfirmed streak before selecting cohort
+        if hasattr(repository, "pause_unresponsive_subscribers"):
+            paused_chat_ids = repository.pause_unresponsive_subscribers(max_unconfirmed=max_unconfirmed)
+            if paused_chat_ids:
+                wakeup_html = (
+                    "⏸️ <b>שמנו לב שלא אישרת תגובה ב-5 הפוסטים האחרונים שנשלחו אליך.</b>\n"
+                    "כדי לשמור על איכות התגובות של הקהילה, השהינו זמנית את שליחת הפוסטים אליך.\n\n"
+                    "👇 <b>מוכן לחזור להגיב?</b> לחץ על הכפתור למטה (או שלח <code>/ready</code>) ונחדש מיד את השליחה!"
                 )
-            active_subscribers = repository.get_active_subscribers()
+                wakeup_markup = {
+                    "inline_keyboard": [
+                        [{"text": "🔔 חזרתי - שלח לי פוסטים", "callback_data": "ready:confirm"}]
+                    ]
+                }
+                for p_cid in paused_chat_ids:
+                    self._send_direct_message(
+                        chat_id=p_cid,
+                        text_html=wakeup_html,
+                        reply_markup=wakeup_markup,
+                        http_client=http_client,
+                        repository=repository,
+                    )
 
-        if not active_subscribers:
+        # Detect tweet language ('ar' if Arabic characters present, else 'en')
+        is_arabic = any("\u0600" <= c <= "\u06ff" for c in (tweet_text or ""))
+        tweet_lang = "ar" if is_arabic else "en"
+
+        # 2. Fetch eligible cohort in a single SQL query (zero N+1 queries!)
+        if hasattr(repository, "get_eligible_subscribers_for_tweet"):
+            eligible_subscribers = repository.get_eligible_subscribers_for_tweet(
+                tweet_id=tweet_id,
+                lang=tweet_lang,
+                limit=cohort_limit,
+                max_unconfirmed=max_unconfirmed,
+            )
+            # Fallback: if no subscribers exist in the DB at all yet, seed static operator chat_ids
+            if not eligible_subscribers and self.chat_ids and not repository.get_active_subscribers():
+                for cid in self.chat_ids:
+                    repository.upsert_subscriber(
+                        chat_id=cid,
+                        username="operator_admin",
+                        tier="admin",
+                        daily_limit=100,
+                        preferred_style="any",
+                        preferred_lang="both",
+                        ready_confirmed=True,
+                        active=True,
+                    )
+                eligible_subscribers = repository.get_eligible_subscribers_for_tweet(
+                    tweet_id=tweet_id,
+                    lang=tweet_lang,
+                    limit=cohort_limit,
+                    max_unconfirmed=max_unconfirmed,
+                )
+        else:
+            eligible_subscribers = repository.get_active_subscribers()[:cohort_limit]
+
+        if not eligible_subscribers:
             return 0
 
         used_hashes = set(repository.get_used_variation_hashes(tweet_id))
@@ -447,19 +766,12 @@ class TelegramDispatcher:
 
         dispatched_count = 0
 
-        for sub in active_subscribers:
+        for sub in eligible_subscribers:
             if not available_vars:
                 break
 
             chat_id = str(sub["chat_id"]).strip()
-            daily_limit = int(sub.get("daily_limit", 3))
             pref_style = (sub.get("preferred_style") or "any").strip().lower()
-
-            # Check deduplication & daily quota
-            if repository.has_received_tweet(tweet_id, chat_id):
-                continue
-            if repository.get_subscriber_daily_count(chat_id) >= daily_limit:
-                continue
 
             # Pick variation matching preferred_style if available, else first unused variation
             chosen_idx = 0
@@ -482,6 +794,8 @@ class TelegramDispatcher:
                 verified_facts=verified_facts,
                 http_client=http_client,
                 target_chat_ids=[chat_id],
+                include_ack_button=True,
+                repository=repository,
             )
 
             if sent:

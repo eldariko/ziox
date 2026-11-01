@@ -3,6 +3,8 @@
 import argparse
 import sys
 import logging
+import time
+from datetime import datetime
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -16,6 +18,7 @@ from providers.twikit_provider import TwikitTwitterProvider
 from engine.grounding import GroundingEngine
 from engine.orchestrator import BotOrchestrator
 from engine.radar import DiscoveryRadar, extract_tweet_id
+from engine.telegram_dispatcher import TelegramDispatcher
 
 logging.basicConfig(
     level=logging.INFO,
@@ -147,6 +150,22 @@ def main():
         help="Execute a single monitoring, verification, and engagement cycle"
     )
     parser.add_argument(
+        "--sync-telegram",
+        action="store_true",
+        help="Poll Telegram getUpdates once to sync subscribers, commands, and callback confirmations"
+    )
+    parser.add_argument(
+        "--poll-telegram",
+        action="store_true",
+        help="Run continuous live polling daemon for Telegram commands (/start, /ready, /lang, /quota) and button callbacks"
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=2.0,
+        help="Polling interval in seconds for --poll-telegram (default: 2.0s)"
+    )
+    parser.add_argument(
         "--live",
         action="store_true",
         help="Override DRY_RUN and allow live publishing to X"
@@ -160,6 +179,12 @@ def main():
         "--threshold",
         type=float,
         help="Override minimum virality threshold score (e.g. --threshold 1.0)"
+    )
+    parser.add_argument(
+        "--min-faves",
+        type=int,
+        default=None,
+        help="Minimum likes filter in search query (e.g. --min-faves 5) to filter out 0-engagement noise"
     )
     parser.add_argument(
         "-i", "--interactive",
@@ -179,6 +204,9 @@ def main():
     if args.threshold is not None:
         settings.virality_threshold = args.threshold
 
+    if args.min_faves is not None:
+        settings.search_min_faves = args.min_faves
+
     repo = Repository(
         db_path=settings.database_path,
         turso_url=settings.turso_database_url,
@@ -188,6 +216,43 @@ def main():
     if args.status:
         show_status(repo, settings)
         return
+
+    if args.sync_telegram or args.poll_telegram:
+        if not settings.telegram_bot_token:
+            logger.error("TELEGRAM_BOT_TOKEN is not configured in .env. Exiting.")
+            sys.exit(1)
+        dispatcher = TelegramDispatcher(
+            bot_token=settings.telegram_bot_token,
+            chat_ids=settings.telegram_chat_id
+        )
+        if args.sync_telegram:
+            print("[zioX Telegram] Syncing updates from Telegram servers...")
+            summary = dispatcher.sync_subscribers(
+                repository=repo,
+                default_daily_limit=3,
+                max_user_daily_limit=settings.max_user_daily_limit,
+            )
+            print(f"[zioX Telegram] Sync completed: {summary}")
+            return
+
+        if args.poll_telegram:
+            print(f"[zioX Telegram] Starting live continuous polling daemon (interval: {args.poll_interval}s)...")
+            print("  The bot is now listening for /start, /ready, /lang, /limit, /quota and button clicks in real time.")
+            print("  Press Ctrl+C to terminate.")
+            try:
+                while True:
+                    summary = dispatcher.sync_subscribers(
+                        repository=repo,
+                        default_daily_limit=3,
+                        max_user_daily_limit=settings.max_user_daily_limit,
+                    )
+                    any_activity = any(v > 0 for v in summary.values())
+                    if any_activity:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Processed Telegram updates: {summary}")
+                    time.sleep(args.poll_interval)
+            except KeyboardInterrupt:
+                print("\n[zioX Telegram] Polling daemon stopped by user.")
+            return
 
     if args.queue_list:
         show_queue(repo)
@@ -245,6 +310,7 @@ def main():
             min_search_delay_seconds=settings.min_search_delay_seconds,
             max_search_delay_seconds=settings.max_search_delay_seconds,
             dry_run=settings.dry_run,
+            min_faves=settings.search_min_faves,
         )
         print(f"[zioX Radar] Scan complete. Enqueued {len(discovered)} candidate tweets into database.")
         for item in discovered:

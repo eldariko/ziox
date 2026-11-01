@@ -195,13 +195,15 @@ def test_orchestrator_telegram_review_and_deduplication(tmp_path):
     provider = DummyMockProvider(sample_tweets=[viral_tweet])
 
     mock_grounding = MagicMock(spec=GroundingEngine)
-    mock_grounding.evaluate_and_draft.return_value = FactCheckResult(
+    sample_fc = FactCheckResult(
         is_worth_replying=True,
         claim_identified="Incorrect timeline",
         draft_reply="Official records show this claim is inaccurate. Check verified logs.",
         recommended_link="https://mfa.gov.il",
         verified_facts=["Fact A"],
     )
+    mock_grounding.evaluate_and_draft.return_value = sample_fc
+    mock_grounding.generate_variations_batch.return_value = sample_fc
 
     mock_dispatcher = MagicMock(spec=TelegramDispatcher)
     mock_dispatcher.is_configured = True
@@ -405,6 +407,11 @@ def test_dispatch_variations_to_subscribers_unique_sharding(tmp_path):
     # Subscriber 103 ('any') -> gets remaining variation 3
     assert "Legal rebuttal variation 3" in by_chat["103"]
 
+    # Verify the inline keyboard includes the '✅ הגבתי ב-X' (ack:<tweet_id>) confirmation button!
+    kb_101 = sent_payloads[0]["reply_markup"]["inline_keyboard"]
+    assert len(kb_101) == 3
+    assert kb_101[1][0]["callback_data"] == "ack:viral_900"
+
     # Calling again for the same tweet_id should send 0 messages (all 3 subscribers already received it)
     sent_payloads.clear()
     with httpx.Client(transport=transport) as client:
@@ -419,3 +426,117 @@ def test_dispatch_variations_to_subscribers_unique_sharding(tmp_path):
             http_client=client,
         )
     assert repeat_count == 0
+
+
+def test_scale_1000_readiness_gate_commands_callbacks_and_403_deactivation(tmp_path):
+    """
+    Verify Scale-1000 Tasks 3.1 & 3.2:
+    - /start with require_readiness_confirm=True puts user in ready_confirmed=0 until /ready or callback ready:confirm
+    - /lang <en|ar|both>, /limit <number>, /quota commands
+    - callback_query ack:<tweet_id> resets consecutive_unconfirmed and answers callback
+    - HTTP 403 Forbidden automatically deactivates blocked subscriber
+    - Auto-pause notification sent when subscriber hits max_unconfirmed_dispatches
+    """
+    db_file = str(tmp_path / "test_scale_tg.db")
+    repo = Repository(db_file)
+    dispatcher = TelegramDispatcher(bot_token="test_bot_token", chat_ids="")
+
+    sent_messages = []
+    callback_answers = []
+
+    def mock_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if "getUpdates" in url_str:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": [
+                        {
+                            "update_id": 200,
+                            "message": {"chat": {"id": 5001, "username": "u_ready"}, "text": "/start"},
+                        },
+                        {
+                            "update_id": 201,
+                            "message": {"chat": {"id": 5002, "username": "u_pending"}, "text": "/start"},
+                        },
+                        {
+                            "update_id": 202,
+                            "callback_query": {
+                                "id": "cb_1",
+                                "data": "ready:confirm",
+                                "message": {"chat": {"id": 5001}},
+                            },
+                        },
+                        {
+                            "update_id": 203,
+                            "message": {"chat": {"id": 5001, "username": "u_ready"}, "text": "/lang en"},
+                        },
+                        {
+                            "update_id": 204,
+                            "message": {"chat": {"id": 5001, "username": "u_ready"}, "text": "/limit 4"},
+                        },
+                        {
+                            "update_id": 205,
+                            "message": {"chat": {"id": 5001, "username": "u_ready"}, "text": "/quota"},
+                        },
+                    ],
+                },
+            )
+        elif "answerCallbackQuery" in url_str:
+            callback_answers.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True})
+        elif "sendMessage" in url_str:
+            payload = json.loads(request.content)
+            if payload["chat_id"] == "blocked_user":
+                return httpx.Response(403, json={"ok": False, "description": "Forbidden: bot was blocked by the user"})
+            sent_messages.append(payload)
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(mock_handler)
+    with httpx.Client(transport=transport) as client:
+        summary = dispatcher.sync_subscribers(
+            repository=repo,
+            default_daily_limit=3,
+            max_user_daily_limit=5,
+            require_readiness_confirm=True,
+            http_client=client,
+        )
+
+    assert summary["started"] == 2
+    assert summary["ready_confirmed"] == 1
+    assert summary["lang_updated"] == 1
+    assert summary["limit_updated"] == 1
+    assert len(callback_answers) == 1
+
+    # 5001 confirmed readiness, set lang='en', limit=4; 5002 did NOT confirm readiness yet
+    sub_5001 = repo.get_subscriber("5001")
+    sub_5002 = repo.get_subscriber("5002")
+    assert sub_5001["ready_confirmed"] == 1
+    assert sub_5001["preferred_lang"] == "en"
+    assert sub_5001["daily_limit"] == 4
+    assert sub_5002["ready_confirmed"] == 0
+
+    # Add a subscriber who blocked the bot (returns 403)
+    repo.upsert_subscriber(chat_id="blocked_user", username="blocker", ready_confirmed=True, active=True)
+
+    variations = [
+        {"style": "factual", "text": "Variation for 5001", "link": None},
+        {"style": "sharp", "text": "Variation for blocked_user", "link": None},
+    ]
+    with httpx.Client(transport=transport) as client:
+        sent_cnt = dispatcher.dispatch_variations_to_subscribers(
+            repository=repo,
+            tweet_id="t_999",
+            author_handle="author",
+            tweet_text="English claim tweet",
+            virality_score=15.0,
+            virality_tier="HIGH",
+            variations=variations,
+            http_client=client,
+        )
+
+    # 5001 received the card; 5002 was skipped (ready_confirmed=0); blocked_user returned 403 and was deactivated!
+    assert sent_cnt == 1
+    assert repo.get_subscriber("blocked_user")["active"] == 0

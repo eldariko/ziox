@@ -1,10 +1,11 @@
 """Main Orchestrator pipeline connecting all zioX modules."""
 
+import inspect
 import logging
 import random
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from config.settings import Settings
 from database.repository import Repository
 from providers.base import (
@@ -99,13 +100,72 @@ class BotOrchestrator:
                 logger.error(f"Failed sending admin circuit breaker alert: {alert_err}")
 
     def _sync_telegram_subscribers_if_enabled(self, interactive: bool) -> None:
-        """Poll Telegram `getUpdates` for `/start`, `/stop`, `/style` before dispatching."""
+        """Poll Telegram `getUpdates` for `/start`, `/ready`, `/stop`, `/style`, `/lang`, `/limit`, `/quota`."""
         if self.settings.telegram_review_enabled and not interactive:
             if hasattr(self.telegram, "sync_subscribers"):
                 try:
-                    self.telegram.sync_subscribers(repository=self.repo)
+                    sig = inspect.signature(self.telegram.sync_subscribers)
+                    if "max_user_daily_limit" in sig.parameters:
+                        self.telegram.sync_subscribers(
+                            repository=self.repo,
+                            max_user_daily_limit=getattr(self.settings, "max_user_daily_limit", 5),
+                        )
+                    else:
+                        self.telegram.sync_subscribers(repository=self.repo)
                 except Exception as sync_err:
                     logger.warning(f"Telegram subscriber sync skipped/failed: {sync_err}")
+
+    @staticmethod
+    def detect_tweet_language(text: str) -> str:
+        """Return 'ar' if Arabic script characters are present, otherwise 'en'."""
+        return "ar" if any("\u0600" <= c <= "\u06ff" for c in (text or "")) else "en"
+
+    def _evaluate_tweet_for_cohort(
+        self,
+        tweet_id: str,
+        tweet_text: str,
+        author_handle: str,
+        interactive: bool = False,
+    ) -> Any:
+        """
+        Determine how many eligible subscribers need variations for `tweet_id` in the current wave
+        and invoke `generate_variations_batch` when a large cohort (>4) is waiting, or standard
+        `evaluate_and_draft` for small/single-user runs.
+        """
+        cohort_cap = getattr(self.settings, "target_cohort_size_per_tweet", 25)
+        max_unconfirmed = getattr(self.settings, "max_unconfirmed_dispatches", 5)
+        default_vars = getattr(self.settings, "variations_per_tweet", 4)
+        max_per_call = getattr(self.settings, "max_variations_per_gemini_call", 10)
+
+        needed_variations = default_vars
+        if self.settings.telegram_review_enabled and not interactive and hasattr(self.repo, "get_eligible_subscribers_for_tweet"):
+            tweet_lang = self.detect_tweet_language(tweet_text)
+            eligible = self.repo.get_eligible_subscribers_for_tweet(
+                tweet_id=tweet_id,
+                lang=tweet_lang,
+                limit=cohort_cap,
+                max_unconfirmed=max_unconfirmed,
+            )
+            if eligible:
+                needed_variations = max(default_vars, len(eligible))
+
+        if (
+            needed_variations > default_vars
+            and hasattr(self.grounding, "generate_variations_batch")
+            and callable(getattr(self.grounding, "generate_variations_batch"))
+        ):
+            res = self.grounding.generate_variations_batch(
+                tweet_text=tweet_text,
+                author_handle=author_handle,
+                total_variations=needed_variations,
+                max_per_call=max_per_call,
+            )
+            # If grounding is a MagicMock without generate_variations_batch configured to return a FactCheckResult,
+            # fall back cleanly to evaluate_and_draft
+            if hasattr(res, "is_worth_replying") and isinstance(getattr(res, "is_worth_replying"), bool):
+                return res
+
+        return self.grounding.evaluate_and_draft(tweet_text, author_handle)
 
     def _dispatch_to_telegram_community(
         self,
@@ -115,18 +175,29 @@ class BotOrchestrator:
         eval_result: Any,
         final_reply: str,
         effective_link: Optional[str],
-    ) -> bool:
+    ) -> Tuple[bool, str]:
         """
-        Dispatch unique variations per active subscriber when multi-variation routing is available,
+        Dispatch unique variations per eligible subscriber in the current horizontal cohort wave,
         falling back to standard `dispatch_review` for single-chat / legacy mocks.
+        Returns `(dispatched_ok, next_tweet_status)` where `next_tweet_status` is:
+        - `'DISPATCHED_WAVE'` if more eligible subscribers remain for a subsequent wave
+        - `'DISPATCHED_TELEGRAM'` if all eligible subscribers have been served
+        - `'DISPATCH_FAILED'` if dispatch failed
         """
+        cohort_cap = getattr(self.settings, "target_cohort_size_per_tweet", 25)
+        max_unconfirmed = getattr(self.settings, "max_unconfirmed_dispatches", 5)
+        no_link_ratio = getattr(self.settings, "no_link_variation_ratio", 0.0)
+
         raw_variations = getattr(eval_result, "draft_variations", None) or []
         if raw_variations:
+            # Only apply linkless ratio when we have a community cohort (>3 variations)
+            effective_ratio = no_link_ratio if len(raw_variations) >= 4 else 0.0
             diversified_vars = Humanizer.diversify_links_for_variations(
                 variations=raw_variations,
                 tweet_text=tweet.text,
                 validate_links=False,
                 max_length=280,
+                no_link_variation_ratio=effective_ratio,
             )
         else:
             diversified_vars = [
@@ -139,21 +210,41 @@ class BotOrchestrator:
 
         active_subs = self.repo.get_active_subscribers()
         if active_subs and hasattr(self.telegram, "dispatch_variations_to_subscribers"):
-            sent_count = self.telegram.dispatch_variations_to_subscribers(
-                repository=self.repo,
-                tweet_id=tweet.id,
-                author_handle=tweet.author_handle,
-                tweet_text=tweet.text,
-                virality_score=virality_score,
-                virality_tier=tier,
-                variations=diversified_vars,
-                claim_flagged=eval_result.claim_identified,
-                verified_facts=eval_result.verified_facts,
-            )
-            if isinstance(sent_count, int) and sent_count > 0:
-                return True
+            sig = inspect.signature(self.telegram.dispatch_variations_to_subscribers)
+            call_kwargs: Dict[str, Any] = {
+                "repository": self.repo,
+                "tweet_id": tweet.id,
+                "author_handle": tweet.author_handle,
+                "tweet_text": tweet.text,
+                "virality_score": virality_score,
+                "virality_tier": tier,
+                "variations": diversified_vars,
+                "claim_flagged": eval_result.claim_identified,
+                "verified_facts": eval_result.verified_facts,
+            }
+            if "cohort_limit" in sig.parameters:
+                call_kwargs["cohort_limit"] = cohort_cap
+            if "max_unconfirmed" in sig.parameters:
+                call_kwargs["max_unconfirmed"] = max_unconfirmed
 
-        return bool(
+            sent_count = self.telegram.dispatch_variations_to_subscribers(**call_kwargs)
+            if isinstance(sent_count, int) and sent_count > 0:
+                # Check if additional eligible subscribers still haven't received this tweet
+                tweet_lang = self.detect_tweet_language(tweet.text)
+                remaining_eligible = (
+                    self.repo.get_eligible_subscribers_for_tweet(
+                        tweet_id=tweet.id,
+                        lang=tweet_lang,
+                        limit=1,
+                        max_unconfirmed=max_unconfirmed,
+                    )
+                    if hasattr(self.repo, "get_eligible_subscribers_for_tweet")
+                    else []
+                )
+                next_status = "DISPATCHED_WAVE" if remaining_eligible else "DISPATCHED_TELEGRAM"
+                return True, next_status
+
+        dispatched = bool(
             self.telegram.dispatch_review(
                 tweet_id=tweet.id,
                 author_handle=tweet.author_handle,
@@ -165,6 +256,7 @@ class BotOrchestrator:
                 verified_facts=eval_result.verified_facts,
             )
         )
+        return dispatched, ("DISPATCHED_TELEGRAM" if dispatched else "DISPATCH_FAILED")
 
     def _apply_stealth_delay(self, reply_count_in_cycle: int) -> float:
         """
@@ -207,6 +299,22 @@ class BotOrchestrator:
             return None
         return candidate
 
+    def _get_effective_cycle_cap(self, interactive: bool) -> int:
+        """
+        Return the per-cycle tweet cap:
+        - When Telegram community distribution is enabled (non-interactive) and multiple subscribers
+          are active, allow up to `telegram_tweets_per_cycle` so horizontal cohorts cover multiple viral posts.
+        - Otherwise use `max_replies_per_cycle`.
+        """
+        if self.settings.telegram_review_enabled and not interactive:
+            active_subs = self.repo.get_active_subscribers()
+            if len(active_subs) > 1:
+                return max(
+                    self.settings.max_replies_per_cycle,
+                    getattr(self.settings, "telegram_tweets_per_cycle", 10),
+                )
+        return self.settings.max_replies_per_cycle
+
     def run_cycle(self, interactive: bool = False) -> Dict[str, Any]:
         """
         Executes a single monitoring and engagement cycle.
@@ -237,13 +345,15 @@ class BotOrchestrator:
 
         # 1. Ingestion across search queries with Boolean OR consolidation & circuit breaker protection
         candidate_tweets: Dict[str, Tweet] = {}
+        min_faves_val = getattr(self.settings, 'search_min_faves', 0)
         queries_to_run = (
             DiscoveryRadar.build_consolidated_queries(
                 self.settings.search_keywords,
-                max_per_query=self.settings.max_keywords_per_query
+                max_per_query=self.settings.max_keywords_per_query,
+                min_faves=min_faves_val
             )
             if self.settings.combine_search_queries
-            else [k.strip() for k in self.settings.search_keywords if k.strip()]
+            else [f'{k.strip()} min_faves:{min_faves_val}' if min_faves_val > 0 else k.strip() for k in self.settings.search_keywords if k.strip()]
         )
 
         for idx, query_str in enumerate(queries_to_run):
@@ -281,11 +391,13 @@ class BotOrchestrator:
             reverse=True
         )
 
+        cycle_cap = self._get_effective_cycle_cap(interactive=interactive)
+
         for tweet in sorted_tweets:
             # Per-cycle rate limiting cap
-            if replies_sent >= self.settings.max_replies_per_cycle:
+            if replies_sent >= cycle_cap:
                 logger.info(
-                    f"[STEALTH PACING] Reached cycle cap of {self.settings.max_replies_per_cycle} replies. Ending cycle."
+                    f"[STEALTH PACING] Reached cycle cap of {cycle_cap} replies. Ending cycle."
                 )
                 break
 
@@ -316,8 +428,13 @@ class BotOrchestrator:
                 logger.info(f"Skipping tweet {tweet.id}: {thread_reason}")
                 continue
 
-            # 4. Fact Grounding & Verification
-            eval_result = self.grounding.evaluate_and_draft(tweet.text, tweet.author_handle)
+            # 4. Fact Grounding & Verification (Cohort-Sized Batch Generation)
+            eval_result = self._evaluate_tweet_for_cohort(
+                tweet_id=tweet.id,
+                tweet_text=tweet.text,
+                author_handle=tweet.author_handle,
+                interactive=interactive,
+            )
             if not eval_result.is_worth_replying or not eval_result.draft_reply:
                 self.repo.save_processed_tweet(
                     tweet_id=tweet.id,
@@ -392,7 +509,7 @@ class BotOrchestrator:
             # 6. Telegram Review Dispatch (Asynchronous Human-in-the-Loop & Multi-User Sharding)
             if self.settings.telegram_review_enabled and not interactive:
                 tier = get_virality_tier(tweet)
-                dispatched = self._dispatch_to_telegram_community(
+                dispatched, next_status = self._dispatch_to_telegram_community(
                     tweet=tweet,
                     virality_score=virality_score,
                     tier=tier,
@@ -401,7 +518,7 @@ class BotOrchestrator:
                     effective_link=effective_link,
                 )
 
-                # Save record to DB to guarantee deduplication across subsequent runs
+                # Save record to DB (status is DISPATCHED_WAVE if more subscribers remain, else DISPATCHED_TELEGRAM)
                 self.repo.save_processed_tweet(
                     tweet_id=tweet.id,
                     parent_tweet_id=tweet.in_reply_to_tweet_id,
@@ -411,7 +528,7 @@ class BotOrchestrator:
                     link_attached=effective_link,
                     virality_score=virality_score,
                     was_published=False,
-                    status="DISPATCHED_TELEGRAM" if dispatched else "DISPATCH_FAILED"
+                    status=next_status,
                 )
 
                 replies_sent += 1
@@ -422,12 +539,13 @@ class BotOrchestrator:
                     "claim": eval_result.claim_identified,
                     "reply": final_reply,
                     "published": False,
-                    "telegram_dispatched": dispatched
+                    "telegram_dispatched": dispatched,
+                    "status": next_status,
                 })
 
-                if replies_sent >= self.settings.max_replies_per_cycle:
+                if replies_sent >= cycle_cap:
                     logger.info(
-                        f"[STEALTH PACING] Reached cycle cap of {self.settings.max_replies_per_cycle} replies. Ending cycle."
+                        f"[STEALTH PACING] Reached cycle cap of {cycle_cap} replies. Ending cycle."
                     )
                     break
                 continue
@@ -475,13 +593,13 @@ class BotOrchestrator:
                 "virality_score": virality_score,
                 "claim": eval_result.claim_identified,
                 "reply": final_reply,
-                "published": was_published
+                "published": was_published,
             })
 
             # Check cycle cap
-            if replies_sent >= self.settings.max_replies_per_cycle:
+            if replies_sent >= cycle_cap:
                 logger.info(
-                    f"[STEALTH PACING] Reached cycle cap of {self.settings.max_replies_per_cycle} replies. Ending cycle."
+                    f"[STEALTH PACING] Reached cycle cap of {cycle_cap} replies. Ending cycle."
                 )
                 break
 
@@ -511,8 +629,8 @@ class BotOrchestrator:
         target_tweet_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Processes candidate tweets waiting in the DISCOVERED queue.
-        Evaluates virality, checks thread permissions, runs Gemini grounding,
+        Processes candidate tweets waiting in the DISCOVERED (or DISPATCHED_WAVE) queue.
+        Evaluates virality, checks thread permissions, runs Gemini grounding (in cohort batches),
         prompts in interactive mode (if enabled), applies stealth pacing & link diversity,
         and publishes or dispatches the verified reply variations.
         """
@@ -545,7 +663,12 @@ class BotOrchestrator:
                             "status": "DISCOVERED"
                         }]
         else:
-            pending_items = self.repo.get_pending_tweets(limit=limit)
+            include_waves = bool(self.settings.telegram_review_enabled and not interactive)
+            sig = inspect.signature(self.repo.get_pending_tweets)
+            if "include_waves" in sig.parameters:
+                pending_items = self.repo.get_pending_tweets(limit=limit, include_waves=include_waves)
+            else:
+                pending_items = self.repo.get_pending_tweets(limit=limit)
 
         if not pending_items:
             logger.info("No candidate tweets found in queue.")
@@ -554,12 +677,13 @@ class BotOrchestrator:
         processed_count = 0
         replies_sent = 0
         results: List[Dict[str, Any]] = []
+        cycle_cap = self._get_effective_cycle_cap(interactive=interactive)
 
         for item in pending_items:
             # Per-cycle rate limiting cap
-            if replies_sent >= self.settings.max_replies_per_cycle:
+            if replies_sent >= cycle_cap:
                 logger.info(
-                    f"[STEALTH PACING] Reached queue cycle cap of {self.settings.max_replies_per_cycle} replies. Halting queue run."
+                    f"[STEALTH PACING] Reached queue cycle cap of {cycle_cap} replies. Halting queue run."
                 )
                 break
 
@@ -599,8 +723,13 @@ class BotOrchestrator:
                 logger.info(f"Skipping queued tweet {tweet_id}: {thread_reason}")
                 continue
 
-            # 3. Fact Grounding & Verification
-            eval_result = self.grounding.evaluate_and_draft(text, author)
+            # 3. Fact Grounding & Verification (Cohort-Sized Batch Generation)
+            eval_result = self._evaluate_tweet_for_cohort(
+                tweet_id=tweet_id,
+                tweet_text=text,
+                author_handle=author,
+                interactive=interactive,
+            )
             if not eval_result.is_worth_replying or not eval_result.draft_reply:
                 self.repo.update_tweet_status(tweet_id, status="SKIPPED")
                 logger.info(f"Tweet {tweet_id} not worth replying (factual claim missing or unsupported).")
@@ -664,7 +793,7 @@ class BotOrchestrator:
             # Telegram Review Dispatch in queue processing (Asynchronous Human-in-the-Loop & Multi-User Sharding)
             if self.settings.telegram_review_enabled and not interactive:
                 tier = get_virality_tier(tweet_obj)
-                dispatched = self._dispatch_to_telegram_community(
+                dispatched, next_status = self._dispatch_to_telegram_community(
                     tweet=tweet_obj,
                     virality_score=score,
                     tier=tier,
@@ -675,7 +804,7 @@ class BotOrchestrator:
 
                 self.repo.update_tweet_status(
                     tweet_id=tweet_id,
-                    status="DISPATCHED_TELEGRAM" if dispatched else "DISPATCH_FAILED",
+                    status=next_status,
                     reply_generated=final_reply,
                     link_attached=effective_link,
                     was_published=False
@@ -689,12 +818,13 @@ class BotOrchestrator:
                     "claim": eval_result.claim_identified,
                     "reply": final_reply,
                     "published": False,
-                    "telegram_dispatched": dispatched
+                    "telegram_dispatched": dispatched,
+                    "status": next_status,
                 })
 
-                if replies_sent >= self.settings.max_replies_per_cycle:
+                if replies_sent >= cycle_cap:
                     logger.info(
-                        f"[STEALTH PACING] Reached queue cycle cap of {self.settings.max_replies_per_cycle} replies. Halting queue run."
+                        f"[STEALTH PACING] Reached queue cycle cap of {cycle_cap} replies. Halting queue run."
                     )
                     break
 
@@ -749,9 +879,9 @@ class BotOrchestrator:
             })
 
             # Check cycle cap
-            if replies_sent >= self.settings.max_replies_per_cycle:
+            if replies_sent >= cycle_cap:
                 logger.info(
-                    f"[STEALTH PACING] Reached queue cycle cap of {self.settings.max_replies_per_cycle} replies. Halting queue run."
+                    f"[STEALTH PACING] Reached queue cycle cap of {cycle_cap} replies. Halting queue run."
                 )
                 break
 
@@ -785,7 +915,7 @@ class BotOrchestrator:
         2. Verifies monthly reply quota ceiling.
         3. Syncs Telegram subscribers (`getUpdates`) and checks scanner cooldown quarantine.
         4. Runs Discovery Radar to search keywords and enqueue viral posts.
-        5. Processes pending queue up to per-cycle stealth caps with Gaussian delays & multi-user variation sharding.
+        5. Processes pending queue up to per-cycle caps with Gaussian delays & multi-user variation sharding.
         6. Returns full run execution metrics.
         """
         # 1. Start Jitter Calculation
@@ -839,6 +969,7 @@ class BotOrchestrator:
                     max_search_delay_seconds=self.settings.max_search_delay_seconds,
                     dry_run=self.settings.dry_run,
                     on_circuit_breaker=self._handle_scanner_circuit_breaker,
+                    min_faves=getattr(self.settings, 'search_min_faves', 0),
                 )
                 logger.info(f"[PIPELINE] Radar discovered and enqueued {len(discovered)} candidate tweets.")
             except Exception as e:
@@ -856,10 +987,11 @@ class BotOrchestrator:
                 }
 
         # 4. Queue Responder Dispatch
-        logger.info(f"[PIPELINE] Processing queue (max cycle replies: {self.settings.max_replies_per_cycle})...")
+        effective_cap = self._get_effective_cycle_cap(interactive=interactive)
+        logger.info(f"[PIPELINE] Processing queue (max cycle tweets: {effective_cap})...")
         queue_report = self.process_queue(
             interactive=interactive,
-            limit=limit_queue
+            limit=max(limit_queue, effective_cap)
         )
 
         return {
