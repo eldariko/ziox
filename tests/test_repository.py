@@ -169,3 +169,105 @@ def test_subscribers_dispatches_and_bot_state_lifecycle(tmp_path):
     assert repo.get_state("telegram_last_update_id") == "54321"
     repo.set_state("telegram_last_update_id", "54325")
     assert repo.get_state("telegram_last_update_id") == "54325"
+
+
+def test_scale_1000_single_query_cohort_eligibility_and_readiness(tmp_path):
+    """
+    Verify Tasks 1.1 & 1.2:
+    - Automatic column migrations on legacy subscribers/dispatches tables
+    - Language filtering (en, ar, both)
+    - Daily limit clamping (/limit)
+    - Readiness confirmation (/ready) and consecutive_unconfirmed streak auto-pause
+    - Single-query cohort selection (get_eligible_subscribers_for_tweet)
+    - Multi-wave DISPATCHED_WAVE queue priority
+    """
+    db_file = str(tmp_path / "test_scale_1000.db")
+    # Simulate legacy subscribers & dispatches tables without new columns
+    conn = sqlite3.connect(db_file)
+    conn.execute("""
+    CREATE TABLE subscribers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT UNIQUE NOT NULL,
+        username TEXT DEFAULT '',
+        tier TEXT DEFAULT 'free',
+        daily_limit INTEGER DEFAULT 3,
+        preferred_style TEXT DEFAULT 'any',
+        active BOOLEAN DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+    conn.execute("""
+    CREATE TABLE dispatches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tweet_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        variation_hash TEXT NOT NULL,
+        style TEXT DEFAULT 'factual',
+        dispatched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(tweet_id, chat_id)
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+    # Initialize Repository -> should auto-migrate missing columns
+    repo = Repository(db_file)
+
+    # Register subscribers with different readiness & language preferences
+    repo.upsert_subscriber(chat_id="u_en", username="en_only", preferred_lang="en", ready_confirmed=True, daily_limit=3)
+    repo.upsert_subscriber(chat_id="u_ar", username="ar_only", preferred_lang="ar", ready_confirmed=True, daily_limit=3)
+    repo.upsert_subscriber(chat_id="u_both", username="both_lang", preferred_lang="both", ready_confirmed=True, daily_limit=2)
+    repo.upsert_subscriber(chat_id="u_pending", username="not_ready", preferred_lang="both", ready_confirmed=False, daily_limit=3)
+
+    # 1. Check eligibility for English tweet ('en') -> u_en and u_both only (u_ar and u_pending excluded)
+    en_cohort = repo.get_eligible_subscribers_for_tweet("tweet_en_1", lang="en", limit=10)
+    assert [s["chat_id"] for s in en_cohort] == ["u_en", "u_both"]
+
+    # 2. Check eligibility for Arabic tweet ('ar') -> u_ar and u_both only
+    ar_cohort = repo.get_eligible_subscribers_for_tweet("tweet_ar_1", lang="ar", limit=10)
+    assert [s["chat_id"] for s in ar_cohort] == ["u_ar", "u_both"]
+
+    # 3. Confirm readiness for u_pending -> now included!
+    repo.confirm_subscriber_ready("u_pending")
+    en_cohort_after = repo.get_eligible_subscribers_for_tweet("tweet_en_1", lang="en", limit=10)
+    assert set(s["chat_id"] for s in en_cohort_after) == {"u_en", "u_both", "u_pending"}
+
+    # 4. Language update & daily limit clamping
+    repo.update_subscriber_language("u_en", "ar")
+    assert repo.get_subscriber("u_en")["preferred_lang"] == "ar"
+    repo.update_subscriber_language("u_en", "en")
+
+    clamped = repo.update_subscriber_daily_limit("u_en", requested_limit=20, max_ceiling=5)
+    assert clamped == 5
+    assert repo.get_subscriber("u_en")["daily_limit"] == 5
+
+    # 5. Unconfirmed streak & confirmation reset
+    for i in range(3):
+        repo.record_dispatch(f"t_streak_{i}", "u_en", f"var_{i}")
+    assert repo.get_subscriber("u_en")["consecutive_unconfirmed"] == 3
+
+    # Confirming one reply resets consecutive_unconfirmed to 0 and increments total_confirmed_replies
+    assert repo.confirm_dispatch_replied("t_streak_1", "u_en") is True
+    sub_en = repo.get_subscriber("u_en")
+    assert sub_en["consecutive_unconfirmed"] == 0
+    assert sub_en["total_confirmed_replies"] == 1
+
+    # Exceeding max_unconfirmed pauses subscriber
+    repo.upsert_subscriber(chat_id="u_ghost", username="ghost", ready_confirmed=True, daily_limit=10)
+    for i in range(5):
+        repo.record_dispatch(f"t_ghost_{i}", "u_ghost", f"ghost_var_{i}")
+    paused_ids = repo.pause_unresponsive_subscribers(max_unconfirmed=5)
+    assert paused_ids == ["u_ghost"]
+    ghost_sub = repo.get_subscriber("u_ghost")
+    assert ghost_sub["active"] == 0
+    assert ghost_sub["ready_confirmed"] == 0
+
+    # 6. Multi-wave DISPATCHED_WAVE queue ordering
+    repo.enqueue_tweet("wave_tweet_1", "author1", "Wave tweet", virality_score=50.0)
+    repo.update_tweet_status("wave_tweet_1", status="DISPATCHED_WAVE")
+    repo.enqueue_tweet("fresh_tweet_2", "author2", "Fresh tweet", virality_score=10.0)
+
+    pending = repo.get_pending_tweets(limit=5, include_waves=True)
+    # Fresh DISCOVERED tweet comes before DISPATCHED_WAVE even if DISPATCHED_WAVE has higher virality
+    assert [p["tweet_id"] for p in pending] == ["fresh_tweet_2", "wave_tweet_1"]

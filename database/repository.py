@@ -11,6 +11,18 @@ from database.turso_client import TursoClient
 
 logger = logging.getLogger(__name__)
 
+SUBSCRIBER_MIGRATIONS = [
+    ("preferred_lang", "ALTER TABLE subscribers ADD COLUMN preferred_lang TEXT DEFAULT 'both'"),
+    ("ready_confirmed", "ALTER TABLE subscribers ADD COLUMN ready_confirmed BOOLEAN DEFAULT 1"),
+    ("consecutive_unconfirmed", "ALTER TABLE subscribers ADD COLUMN consecutive_unconfirmed INTEGER DEFAULT 0"),
+    ("total_confirmed_replies", "ALTER TABLE subscribers ADD COLUMN total_confirmed_replies INTEGER DEFAULT 0"),
+]
+
+DISPATCH_MIGRATIONS = [
+    ("confirmed", "ALTER TABLE dispatches ADD COLUMN confirmed BOOLEAN DEFAULT 0"),
+    ("confirmed_at", "ALTER TABLE dispatches ADD COLUMN confirmed_at TIMESTAMP"),
+]
+
 
 class Repository:
     """
@@ -93,6 +105,19 @@ class Repository:
                 self._remote_client.execute(
                     "ALTER TABLE processed_tweets ADD COLUMN status TEXT DEFAULT 'PROCESSED'"
                 )
+            # Migrate subscribers columns
+            sub_info = self._remote_client.execute("PRAGMA table_info(subscribers)")
+            sub_cols = [row["name"] for row in sub_info.rows]
+            for col_name, alter_sql in SUBSCRIBER_MIGRATIONS:
+                if col_name not in sub_cols:
+                    self._remote_client.execute(alter_sql)
+            # Migrate dispatches columns
+            disp_info = self._remote_client.execute("PRAGMA table_info(dispatches)")
+            disp_cols = [row["name"] for row in disp_info.rows]
+            for col_name, alter_sql in DISPATCH_MIGRATIONS:
+                if col_name not in disp_cols:
+                    self._remote_client.execute(alter_sql)
+
             self._migrate_remove_parent_tweet_fk_remote()
         else:
             with self._get_connection() as conn:
@@ -104,6 +129,21 @@ class Repository:
                 columns = [col["name"] for col in cursor.fetchall()]
                 if "status" not in columns:
                     cursor.execute("ALTER TABLE processed_tweets ADD COLUMN status TEXT DEFAULT 'PROCESSED'")
+
+                # Migrate subscribers columns
+                cursor.execute("PRAGMA table_info(subscribers)")
+                sub_cols = [col["name"] for col in cursor.fetchall()]
+                for col_name, alter_sql in SUBSCRIBER_MIGRATIONS:
+                    if col_name not in sub_cols:
+                        cursor.execute(alter_sql)
+
+                # Migrate dispatches columns
+                cursor.execute("PRAGMA table_info(dispatches)")
+                disp_cols = [col["name"] for col in cursor.fetchall()]
+                for col_name, alter_sql in DISPATCH_MIGRATIONS:
+                    if col_name not in disp_cols:
+                        cursor.execute(alter_sql)
+
                 conn.commit()
                 self._migrate_remove_parent_tweet_fk_local(conn)
 
@@ -221,14 +261,28 @@ class Repository:
                 conn.commit()
                 return cursor.rowcount > 0
 
-    def get_pending_tweets(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Fetch discovered tweets awaiting evaluation or action, ordered by virality momentum."""
-        query = """
-            SELECT * FROM processed_tweets
-            WHERE status = 'DISCOVERED'
-            ORDER BY virality_score DESC, created_at DESC
-            LIMIT ?
+    def get_pending_tweets(self, limit: int = 10, include_waves: bool = True) -> List[Dict[str, Any]]:
         """
+        Fetch discovered tweets (and optionally active multi-wave campaign tweets)
+        awaiting evaluation or action, prioritizing brand-new DISCOVERED tweets first,
+        then ordered by virality momentum.
+        """
+        if include_waves:
+            query = """
+                SELECT * FROM processed_tweets
+                WHERE status IN ('DISCOVERED', 'DISPATCHED_WAVE')
+                ORDER BY CASE WHEN status = 'DISCOVERED' THEN 0 ELSE 1 END ASC,
+                         virality_score DESC,
+                         created_at DESC
+                LIMIT ?
+            """
+        else:
+            query = """
+                SELECT * FROM processed_tweets
+                WHERE status = 'DISCOVERED'
+                ORDER BY virality_score DESC, created_at DESC
+                LIMIT ?
+            """
         if self.is_remote:
             res = self._remote_client.execute(query, [limit])
             return [dict(row) for row in res.rows]
@@ -282,13 +336,18 @@ class Repository:
         was_published: bool = False,
         status: str = "PROCESSED"
     ) -> int:
-        """Store a processed tweet."""
+        """Store or update a processed tweet."""
         query = """
             INSERT INTO processed_tweets (
                 tweet_id, parent_tweet_id, author_handle, tweet_text,
                 reply_generated, link_attached, media_attached,
                 was_published, virality_score, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tweet_id) DO UPDATE SET
+                reply_generated = COALESCE(excluded.reply_generated, processed_tweets.reply_generated),
+                link_attached = COALESCE(excluded.link_attached, processed_tweets.link_attached),
+                was_published = excluded.was_published,
+                status = excluded.status
         """
         params = [
             tweet_id, parent_tweet_id, author_handle, tweet_text,
@@ -448,7 +507,7 @@ class Repository:
                 cursor.execute(query, tuple(params))
                 conn.commit()
 
-    # --- Phase C: Multi-User Subscribers, Dispatches Ledger & Bot State ---
+    # --- Phase C & Scale-1000: Multi-User Subscribers, Readiness, Dispatches Ledger & Bot State ---
 
     def upsert_subscriber(
         self,
@@ -457,20 +516,31 @@ class Repository:
         tier: str = "free",
         daily_limit: int = 3,
         preferred_style: str = "any",
+        preferred_lang: str = "both",
+        ready_confirmed: bool = True,
         active: bool = True,
     ) -> None:
-        """Insert a new Telegram subscriber or reactivate an existing one."""
+        """Insert a new Telegram subscriber or reactivate/update an existing one."""
         clean_id = str(chat_id).strip()
         active_int = 1 if active else 0
+        ready_int = 1 if ready_confirmed else 0
+        clean_lang = (preferred_lang or "both").strip().lower()
+        if clean_lang not in ("en", "ar", "both"):
+            clean_lang = "both"
+
         query = """
-            INSERT INTO subscribers (chat_id, username, tier, daily_limit, preferred_style, active, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO subscribers (
+                chat_id, username, tier, daily_limit, preferred_style,
+                preferred_lang, ready_confirmed, active, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(chat_id) DO UPDATE SET
                 username = CASE WHEN excluded.username != '' THEN excluded.username ELSE subscribers.username END,
+                ready_confirmed = excluded.ready_confirmed,
                 active = excluded.active,
                 updated_at = CURRENT_TIMESTAMP
         """
-        params = [clean_id, username, tier, daily_limit, preferred_style, active_int]
+        params = [clean_id, username, tier, daily_limit, preferred_style, clean_lang, ready_int, active_int]
         if self.is_remote:
             self._remote_client.execute(query, params)
         else:
@@ -479,8 +549,22 @@ class Repository:
                 cursor.execute(query, tuple(params))
                 conn.commit()
 
+    def get_subscriber(self, chat_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a single subscriber record by `chat_id`."""
+        clean_id = str(chat_id).strip()
+        query = "SELECT * FROM subscribers WHERE chat_id = ?"
+        if self.is_remote:
+            res = self._remote_client.execute(query, [clean_id])
+            return dict(res.rows[0]) if res.rows else None
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (clean_id,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+
     def deactivate_subscriber(self, chat_id: str) -> None:
-        """Mark a subscriber as inactive (/stop)."""
+        """Mark a subscriber as inactive (/stop or HTTP 403 Forbidden)."""
         clean_id = str(chat_id).strip()
         query = """
             UPDATE subscribers
@@ -512,6 +596,170 @@ class Repository:
                 cursor.execute(query, tuple(params))
                 conn.commit()
 
+    def update_subscriber_language(self, chat_id: str, preferred_lang: str) -> None:
+        """Update a subscriber's preferred language (/lang <en|ar|both>)."""
+        clean_id = str(chat_id).strip()
+        clean_lang = preferred_lang.strip().lower()
+        if clean_lang not in ("en", "ar", "both"):
+            clean_lang = "both"
+        query = """
+            UPDATE subscribers
+            SET preferred_lang = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = ?
+        """
+        params = [clean_lang, clean_id]
+        if self.is_remote:
+            self._remote_client.execute(query, params)
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                conn.commit()
+
+    def update_subscriber_daily_limit(
+        self,
+        chat_id: str,
+        requested_limit: int,
+        max_ceiling: int = 5
+    ) -> int:
+        """
+        Update a subscriber's personal daily limit clamped between 1 and `max_ceiling`
+        (unless the subscriber has `tier == 'admin'` or `'pro'`, which allow higher ceilings).
+        Returns the effective clamped limit stored.
+        """
+        clean_id = str(chat_id).strip()
+        sub = self.get_subscriber(clean_id)
+        tier = (sub.get("tier") if sub else "free") or "free"
+        effective_ceiling = 100 if tier == "admin" else (max(15, max_ceiling) if tier == "pro" else max_ceiling)
+        clamped = max(1, min(int(requested_limit), int(effective_ceiling)))
+
+        query = """
+            UPDATE subscribers
+            SET daily_limit = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = ?
+        """
+        params = [clamped, clean_id]
+        if self.is_remote:
+            self._remote_client.execute(query, params)
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                conn.commit()
+        return clamped
+
+    def confirm_subscriber_ready(self, chat_id: str) -> None:
+        """
+        Mark a subscriber as ready and active (`ready_confirmed = 1`, `active = 1`),
+        resetting their `consecutive_unconfirmed` counter to 0.
+        """
+        clean_id = str(chat_id).strip()
+        query = """
+            UPDATE subscribers
+            SET ready_confirmed = 1,
+                active = 1,
+                consecutive_unconfirmed = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = ?
+        """
+        if self.is_remote:
+            self._remote_client.execute(query, [clean_id])
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (clean_id,))
+                conn.commit()
+
+    def confirm_dispatch_replied(self, tweet_id: str, chat_id: str) -> bool:
+        """
+        Record that `chat_id` confirmed replying to `tweet_id` (`ack:<tweet_id>`).
+        Marks the dispatch row `confirmed = 1`, resets `consecutive_unconfirmed = 0`,
+        sets `ready_confirmed = 1, active = 1`, and increments `total_confirmed_replies`.
+        Returns True if the dispatch was newly confirmed, False otherwise.
+        """
+        clean_chat = str(chat_id).strip()
+        clean_tweet = str(tweet_id).strip()
+
+        update_disp = """
+            UPDATE dispatches
+            SET confirmed = 1, confirmed_at = CURRENT_TIMESTAMP
+            WHERE tweet_id = ? AND chat_id = ? AND COALESCE(confirmed, 0) = 0
+        """
+        update_sub_newly_confirmed = """
+            UPDATE subscribers
+            SET consecutive_unconfirmed = 0,
+                ready_confirmed = 1,
+                active = 1,
+                total_confirmed_replies = COALESCE(total_confirmed_replies, 0) + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = ?
+        """
+        update_sub_reset_only = """
+            UPDATE subscribers
+            SET consecutive_unconfirmed = 0,
+                ready_confirmed = 1,
+                active = 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = ?
+        """
+
+        if self.is_remote:
+            res = self._remote_client.execute(update_disp, [clean_tweet, clean_chat])
+            newly_confirmed = res.rows_affected > 0
+            if newly_confirmed:
+                self._remote_client.execute(update_sub_newly_confirmed, [clean_chat])
+            else:
+                self._remote_client.execute(update_sub_reset_only, [clean_chat])
+            return newly_confirmed
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(update_disp, (clean_tweet, clean_chat))
+                newly_confirmed = cursor.rowcount > 0
+                if newly_confirmed:
+                    cursor.execute(update_sub_newly_confirmed, (clean_chat,))
+                else:
+                    cursor.execute(update_sub_reset_only, (clean_chat,))
+                conn.commit()
+                return newly_confirmed
+
+    def pause_unresponsive_subscribers(self, max_unconfirmed: int = 5) -> List[str]:
+        """
+        Find active non-admin subscribers whose `consecutive_unconfirmed >= max_unconfirmed`,
+        pause them (`active = 0`, `ready_confirmed = 0`), and return their `chat_id` list
+        so the dispatcher can send them a wake-up notification.
+        """
+        select_query = """
+            SELECT chat_id FROM subscribers
+            WHERE active = 1
+              AND tier != 'admin'
+              AND COALESCE(consecutive_unconfirmed, 0) >= ?
+        """
+        pause_query = """
+            UPDATE subscribers
+            SET active = 0,
+                ready_confirmed = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE active = 1
+              AND tier != 'admin'
+              AND COALESCE(consecutive_unconfirmed, 0) >= ?
+        """
+        if self.is_remote:
+            res = self._remote_client.execute(select_query, [max_unconfirmed])
+            chat_ids = [str(row["chat_id"]) for row in res.rows]
+            if chat_ids:
+                self._remote_client.execute(pause_query, [max_unconfirmed])
+            return chat_ids
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(select_query, (max_unconfirmed,))
+                chat_ids = [str(row["chat_id"]) for row in cursor.fetchall()]
+                if chat_ids:
+                    cursor.execute(pause_query, (max_unconfirmed,))
+                    conn.commit()
+                return chat_ids
+
     def get_active_subscribers(self) -> List[Dict[str, Any]]:
         """
         Return all active subscribers ordered by least-recently-dispatched first
@@ -531,6 +779,62 @@ class Repository:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query)
+                return [dict(row) for row in cursor.fetchall()]
+
+    def get_eligible_subscribers_for_tweet(
+        self,
+        tweet_id: str,
+        lang: str = "en",
+        limit: int = 25,
+        max_unconfirmed: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Single consolidated SQL query returning up to `limit` eligible subscribers for `tweet_id`:
+        - `active = 1` and `ready_confirmed = 1`
+        - `tier = 'admin'` OR `consecutive_unconfirmed < max_unconfirmed`
+        - `preferred_lang` matches `lang` ('en' or 'ar') or `'both'`
+        - Dispatches received today (`date(dispatched_at) = date('now')`) < `daily_limit`
+        - Has not already received `tweet_id` in `dispatches`
+        Ordered by least-recently-dispatched first (`last_dispatched_at ASC, id ASC`)
+        to guarantee fair horizontal Round-Robin cohort sharding across 5 to 1,000+ subscribers.
+        """
+        clean_lang = (lang or "en").strip().lower()
+        query = """
+            SELECT s.*,
+                   COALESCE(today_counts.cnt, 0) AS today_count,
+                   last_disp.last_dispatched_at
+            FROM subscribers s
+            LEFT JOIN (
+                SELECT chat_id, COUNT(*) AS cnt
+                FROM dispatches
+                WHERE date(dispatched_at) = date('now')
+                GROUP BY chat_id
+            ) today_counts ON today_counts.chat_id = s.chat_id
+            LEFT JOIN (
+                SELECT chat_id, MAX(dispatched_at) AS last_dispatched_at
+                FROM dispatches
+                GROUP BY chat_id
+            ) last_disp ON last_disp.chat_id = s.chat_id
+            WHERE s.active = 1
+              AND COALESCE(s.ready_confirmed, 1) = 1
+              AND (s.tier = 'admin' OR COALESCE(s.consecutive_unconfirmed, 0) < ?)
+              AND (COALESCE(s.preferred_lang, 'both') = 'both' OR s.preferred_lang = ?)
+              AND COALESCE(today_counts.cnt, 0) < s.daily_limit
+              AND NOT EXISTS (
+                  SELECT 1 FROM dispatches d
+                  WHERE d.tweet_id = ? AND d.chat_id = s.chat_id
+              )
+            ORDER BY COALESCE(last_disp.last_dispatched_at, '1970-01-01') ASC, s.id ASC
+            LIMIT ?
+        """
+        params = [int(max_unconfirmed), clean_lang, str(tweet_id), int(limit)]
+        if self.is_remote:
+            res = self._remote_client.execute(query, params)
+            return [dict(row) for row in res.rows]
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
                 return [dict(row) for row in cursor.fetchall()]
 
     def get_admin_chat_ids(self) -> List[str]:
@@ -559,6 +863,7 @@ class Repository:
     ) -> bool:
         """
         Record that a specific reply variation for `tweet_id` was dispatched to `chat_id`.
+        Also increments `consecutive_unconfirmed` by 1 for non-admin subscribers.
         Returns True if newly recorded, False if already dispatched to this chat_id.
         """
         clean_chat = str(chat_id).strip()
@@ -571,16 +876,28 @@ class Repository:
             INSERT OR IGNORE INTO dispatches (tweet_id, chat_id, variation_hash, style)
             VALUES (?, ?, ?, ?)
         """
+        inc_unconfirmed_query = """
+            UPDATE subscribers
+            SET consecutive_unconfirmed = COALESCE(consecutive_unconfirmed, 0) + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = ? AND tier != 'admin'
+        """
         params = [str(tweet_id), clean_chat, v_hash, style]
         if self.is_remote:
             res = self._remote_client.execute(query, params)
-            return res.rows_affected > 0
+            inserted = res.rows_affected > 0
+            if inserted:
+                self._remote_client.execute(inc_unconfirmed_query, [clean_chat])
+            return inserted
         else:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, tuple(params))
+                inserted = cursor.rowcount > 0
+                if inserted:
+                    cursor.execute(inc_unconfirmed_query, (clean_chat,))
                 conn.commit()
-                return cursor.rowcount > 0
+                return inserted
 
     def has_received_tweet(self, tweet_id: str, chat_id: str) -> bool:
         """Check whether `chat_id` has already received a review card for `tweet_id`."""

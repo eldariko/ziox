@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS processed_tweets (
     media_attached TEXT,
     was_published BOOLEAN DEFAULT 0,
     virality_score REAL DEFAULT 0,
-    status TEXT DEFAULT 'PROCESSED', -- 'DISCOVERED', 'PROCESSED', 'APPROVED', 'PUBLISHED', 'SKIPPED'
+    status TEXT DEFAULT 'PROCESSED', -- 'DISCOVERED', 'PROCESSED', 'APPROVED', 'PUBLISHED', 'SKIPPED', 'DISPATCHED_WAVE', 'DISPATCHED_TELEGRAM'
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS subscribers (
     tier TEXT DEFAULT 'free', -- 'free', 'pro', 'admin'
     daily_limit INTEGER DEFAULT 3,
     preferred_style TEXT DEFAULT 'any', -- 'any', 'factual', 'sharp', 'historical_legal', 'rhetorical_question'
+    preferred_lang TEXT DEFAULT 'both', -- 'en', 'ar', 'both'
+    ready_confirmed BOOLEAN DEFAULT 1,
+    consecutive_unconfirmed INTEGER DEFAULT 0,
+    total_confirmed_replies INTEGER DEFAULT 0,
     active BOOLEAN DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -61,6 +65,8 @@ CREATE TABLE IF NOT EXISTS dispatches (
     chat_id TEXT NOT NULL,
     variation_hash TEXT NOT NULL,
     style TEXT DEFAULT 'factual',
+    confirmed BOOLEAN DEFAULT 0,
+    confirmed_at TIMESTAMP,
     dispatched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(tweet_id, chat_id)
 );
