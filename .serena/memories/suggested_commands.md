@@ -13,3 +13,11 @@ Run all commands from the project root using PowerShell or Windows command line:
 - **Serena Health & Memory Checks**:
   - serena memories check
   - serena project health-check .
+- **Unified pipeline (live)**: .\.venv\Scripts\python.exe main.py --pipeline --live [--start-jitter N]
+- **Radar only**: .\.venv\Scripts\python.exe main.py --radar --min-faves 20
+- **Process queue**: main.py --process-queue
+- **Telegram sync once**: main.py --sync-telegram
+- **Telegram real-time daemon**: main.py --poll-telegram --poll-interval 10
+- **Status (shows active DB)**: main.py --status
+- **OpenSpec**: openspec list --json; openspec validate --specs; openspec archive <change> --yes (syncs deltas then archives)
+- Use .\.venv\Scripts\python.exe -m pytest (global pytest lacks deps).
