@@ -3,15 +3,21 @@
 import logging
 import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 from config.settings import Settings
 from database.repository import Repository
-from providers.base import BaseTwitterProvider, Tweet
+from providers.base import (
+    BaseTwitterProvider,
+    Tweet,
+    ScannerCircuitBreakerError,
+    classify_scanner_exception,
+)
 from engine.virality import calculate_virality_score, is_viral_candidate, get_virality_tier
 from engine.thread_state import ThreadManager
-from engine.grounding import GroundingEngine
+from engine.grounding import GroundingEngine, DraftVariation
 from engine.humanizer import Humanizer
+from engine.radar import DiscoveryRadar
 from engine.telegram_dispatcher import TelegramDispatcher
 
 logger = logging.getLogger(__name__)
@@ -49,6 +55,115 @@ class BotOrchestrator:
         self.telegram = telegram_dispatcher or TelegramDispatcher(
             bot_token=settings.telegram_bot_token,
             chat_ids=settings.telegram_chat_id
+        )
+
+    def _is_scanner_in_cooldown(self) -> Optional[str]:
+        """
+        Check if the X scanner account is currently in quarantine cooldown (`scanner_cooldown_until` in `bot_state`).
+        Returns the ISO timestamp string if still in cooldown, otherwise None.
+        """
+        cooldown_until_str = self.repo.get_state("scanner_cooldown_until")
+        if not cooldown_until_str:
+            return None
+        try:
+            cooldown_dt = datetime.fromisoformat(cooldown_until_str)
+            if cooldown_dt.tzinfo is None:
+                cooldown_dt = cooldown_dt.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) < cooldown_dt:
+                return cooldown_until_str
+        except Exception:
+            return None
+        return None
+
+    def _handle_scanner_circuit_breaker(self, cb_err: ScannerCircuitBreakerError) -> None:
+        """
+        Record scanner cooldown quarantine in `bot_state` and dispatch an admin-only
+        alert via `TelegramDispatcher.send_admin_alert`.
+        """
+        cooldown_mins = getattr(self.settings, "scanner_cooldown_minutes", 720)
+        until_dt = datetime.now(timezone.utc) + timedelta(minutes=cooldown_mins)
+        until_iso = until_dt.isoformat()
+        self.repo.set_state("scanner_cooldown_until", until_iso)
+
+        alert_msg = (
+            f"X Scanner Circuit Breaker triggered ({cb_err.reason}). "
+            f"Scanner quarantined until {until_iso} ({cooldown_mins}m cooldown). "
+            f"Raw error: {cb_err}"
+        )
+        logger.critical(f"[CIRCUIT BREAKER QUARANTINE] {alert_msg}")
+
+        if hasattr(self.telegram, "send_admin_alert"):
+            try:
+                self.telegram.send_admin_alert(alert_text=alert_msg, repository=self.repo)
+            except Exception as alert_err:
+                logger.error(f"Failed sending admin circuit breaker alert: {alert_err}")
+
+    def _sync_telegram_subscribers_if_enabled(self, interactive: bool) -> None:
+        """Poll Telegram `getUpdates` for `/start`, `/stop`, `/style` before dispatching."""
+        if self.settings.telegram_review_enabled and not interactive:
+            if hasattr(self.telegram, "sync_subscribers"):
+                try:
+                    self.telegram.sync_subscribers(repository=self.repo)
+                except Exception as sync_err:
+                    logger.warning(f"Telegram subscriber sync skipped/failed: {sync_err}")
+
+    def _dispatch_to_telegram_community(
+        self,
+        tweet: Tweet,
+        virality_score: float,
+        tier: str,
+        eval_result: Any,
+        final_reply: str,
+        effective_link: Optional[str],
+    ) -> bool:
+        """
+        Dispatch unique variations per active subscriber when multi-variation routing is available,
+        falling back to standard `dispatch_review` for single-chat / legacy mocks.
+        """
+        raw_variations = getattr(eval_result, "draft_variations", None) or []
+        if raw_variations:
+            diversified_vars = Humanizer.diversify_links_for_variations(
+                variations=raw_variations,
+                tweet_text=tweet.text,
+                validate_links=False,
+                max_length=280,
+            )
+        else:
+            diversified_vars = [
+                {
+                    "style": "factual",
+                    "text": final_reply,
+                    "link": effective_link,
+                }
+            ]
+
+        active_subs = self.repo.get_active_subscribers()
+        if active_subs and hasattr(self.telegram, "dispatch_variations_to_subscribers"):
+            sent_count = self.telegram.dispatch_variations_to_subscribers(
+                repository=self.repo,
+                tweet_id=tweet.id,
+                author_handle=tweet.author_handle,
+                tweet_text=tweet.text,
+                virality_score=virality_score,
+                virality_tier=tier,
+                variations=diversified_vars,
+                claim_flagged=eval_result.claim_identified,
+                verified_facts=eval_result.verified_facts,
+            )
+            if isinstance(sent_count, int) and sent_count > 0:
+                return True
+
+        return bool(
+            self.telegram.dispatch_review(
+                tweet_id=tweet.id,
+                author_handle=tweet.author_handle,
+                tweet_text=tweet.text,
+                virality_score=virality_score,
+                virality_tier=tier,
+                draft_reply=final_reply,
+                claim_flagged=eval_result.claim_identified,
+                verified_facts=eval_result.verified_facts,
+            )
         )
 
     def _apply_stealth_delay(self, reply_count_in_cycle: int) -> float:
@@ -109,16 +224,54 @@ class BotOrchestrator:
             self.repo.log_run(0, 0, "ABORTED_QUOTA_EXCEEDED", msg)
             return {"status": "QUOTA_EXCEEDED", "scanned": 0, "replies": 0, "details": msg}
 
-        # 1. Ingestion across all keywords with deduplication
+        # Sync Telegram subscribers if Telegram review is enabled
+        self._sync_telegram_subscribers_if_enabled(interactive=interactive)
+
+        # Check scanner cooldown quarantine
+        cooldown_until = self._is_scanner_in_cooldown()
+        if cooldown_until:
+            msg = f"X Scanner is in cooldown quarantine until {cooldown_until}. Skipping live search."
+            logger.warning(msg)
+            self.repo.log_run(0, 0, "SKIPPED_SCANNER_COOLDOWN", msg)
+            return {"status": "SCANNER_COOLDOWN", "scanned": 0, "replies_sent": 0, "details": msg, "results": []}
+
+        # 1. Ingestion across search queries with Boolean OR consolidation & circuit breaker protection
         candidate_tweets: Dict[str, Tweet] = {}
-        for keyword in self.settings.search_keywords:
+        queries_to_run = (
+            DiscoveryRadar.build_consolidated_queries(
+                self.settings.search_keywords,
+                max_per_query=self.settings.max_keywords_per_query
+            )
+            if self.settings.combine_search_queries
+            else [k.strip() for k in self.settings.search_keywords if k.strip()]
+        )
+
+        for idx, query_str in enumerate(queries_to_run):
+            if idx > 0:
+                delay = calculate_gaussian_jitter(
+                    self.settings.min_search_delay_seconds,
+                    self.settings.max_search_delay_seconds
+                )
+                if not self.settings.dry_run and delay > 0:
+                    time.sleep(delay)
+
             try:
-                tweets = self.provider.search_recent_tweets(keyword, limit=5)
+                tweets = self.provider.search_recent_tweets(query_str, limit=5)
                 for tweet in tweets:
                     if tweet.id not in candidate_tweets and not self.repo.is_tweet_processed(tweet.id):
                         candidate_tweets[tweet.id] = tweet
             except Exception as e:
-                logger.error(f"Failed searching keyword '{keyword}': {e}")
+                cb_err = classify_scanner_exception(e)
+                if cb_err is not None:
+                    self._handle_scanner_circuit_breaker(cb_err)
+                    self.repo.log_run(
+                        len(candidate_tweets),
+                        0,
+                        f"ABORTED_CIRCUIT_BREAKER_{cb_err.reason}",
+                        str(cb_err)
+                    )
+                    break
+                logger.error(f"Failed searching query '{query_str}': {e}")
                 continue
 
         # 2. Sort candidate tweets by virality velocity (highest momentum first)
@@ -236,18 +389,16 @@ class BotOrchestrator:
             # Ensure final reply does not exceed Twitter 280 limit before dispatching
             final_reply = Humanizer.enforce_length_limit(final_reply, max_length=280)
 
-            # 6. Telegram Review Dispatch (Asynchronous Human-in-the-Loop)
+            # 6. Telegram Review Dispatch (Asynchronous Human-in-the-Loop & Multi-User Sharding)
             if self.settings.telegram_review_enabled and not interactive:
                 tier = get_virality_tier(tweet)
-                dispatched = self.telegram.dispatch_review(
-                    tweet_id=tweet.id,
-                    author_handle=tweet.author_handle,
-                    tweet_text=tweet.text,
+                dispatched = self._dispatch_to_telegram_community(
+                    tweet=tweet,
                     virality_score=virality_score,
-                    virality_tier=tier,
-                    draft_reply=final_reply,
-                    claim_flagged=eval_result.claim_identified,
-                    verified_facts=eval_result.verified_facts,
+                    tier=tier,
+                    eval_result=eval_result,
+                    final_reply=final_reply,
+                    effective_link=effective_link,
                 )
 
                 # Save record to DB to guarantee deduplication across subsequent runs
@@ -363,13 +514,15 @@ class BotOrchestrator:
         Processes candidate tweets waiting in the DISCOVERED queue.
         Evaluates virality, checks thread permissions, runs Gemini grounding,
         prompts in interactive mode (if enabled), applies stealth pacing & link diversity,
-        and publishes the verified reply.
+        and publishes or dispatches the verified reply variations.
         """
         current_monthly_count = self.repo.get_monthly_reply_count()
         if current_monthly_count >= self.settings.monthly_max_replies:
             msg = f"Monthly reply ceiling reached ({current_monthly_count}/{self.settings.monthly_max_replies}). Process aborted."
             logger.warning(msg)
             return {"status": "QUOTA_EXCEEDED", "processed": 0, "replies_sent": 0, "details": msg}
+
+        self._sync_telegram_subscribers_if_enabled(interactive=interactive)
 
         # 1. Fetch items from queue or specific ID
         pending_items = []
@@ -508,18 +661,16 @@ class BotOrchestrator:
             # Ensure final reply does not exceed Twitter 280 limit before dispatching
             final_reply = Humanizer.enforce_length_limit(final_reply, max_length=280)
 
-            # Telegram Review Dispatch in queue processing (Asynchronous Human-in-the-Loop)
+            # Telegram Review Dispatch in queue processing (Asynchronous Human-in-the-Loop & Multi-User Sharding)
             if self.settings.telegram_review_enabled and not interactive:
                 tier = get_virality_tier(tweet_obj)
-                dispatched = self.telegram.dispatch_review(
-                    tweet_id=tweet_id,
-                    author_handle=author,
-                    tweet_text=text,
+                dispatched = self._dispatch_to_telegram_community(
+                    tweet=tweet_obj,
                     virality_score=score,
-                    virality_tier=tier,
-                    draft_reply=final_reply,
-                    claim_flagged=eval_result.claim_identified,
-                    verified_facts=eval_result.verified_facts,
+                    tier=tier,
+                    eval_result=eval_result,
+                    final_reply=final_reply,
+                    effective_link=effective_link,
                 )
 
                 self.repo.update_tweet_status(
@@ -632,9 +783,10 @@ class BotOrchestrator:
         Executes an end-to-end autonomous pipeline run designed for external schedulers:
         1. Applies optional randomized start jitter delay.
         2. Verifies monthly reply quota ceiling.
-        3. Runs Discovery Radar to search keywords and enqueue viral posts.
-        4. Processes pending queue up to per-cycle stealth caps with Gaussian delays.
-        5. Returns full run execution metrics.
+        3. Syncs Telegram subscribers (`getUpdates`) and checks scanner cooldown quarantine.
+        4. Runs Discovery Radar to search keywords and enqueue viral posts.
+        5. Processes pending queue up to per-cycle stealth caps with Gaussian delays & multi-user variation sharding.
+        6. Returns full run execution metrics.
         """
         # 1. Start Jitter Calculation
         max_jitter = self.settings.start_jitter_max_minutes if start_jitter_minutes is None else start_jitter_minutes
@@ -662,30 +814,46 @@ class BotOrchestrator:
                 "results": []
             }
 
-        # 3. Discovery Radar Ingestion
+        # Sync subscribers early
+        self._sync_telegram_subscribers_if_enabled(interactive=interactive)
+
+        # 3. Discovery Radar Ingestion (skipped if scanner is in cooldown quarantine)
         discovered = []
-        try:
-            logger.info(f"[PIPELINE] Running Discovery Radar across {len(self.settings.search_keywords)} keywords...")
-            discovered = radar.scan_keywords(
-                provider=self.provider,
-                keywords=self.settings.search_keywords,
-                limit_per_keyword=5,
-                min_virality_score=self.settings.virality_threshold
+        cooldown_until = self._is_scanner_in_cooldown()
+        if cooldown_until:
+            logger.warning(
+                f"[PIPELINE] X Scanner is in cooldown quarantine until {cooldown_until}. "
+                f"Skipping live X search and processing existing queue only."
             )
-            logger.info(f"[PIPELINE] Radar discovered and enqueued {len(discovered)} candidate tweets.")
-        except Exception as e:
-            err_msg = f"Discovery Radar failed: {e}"
-            logger.error(err_msg)
-            self.repo.log_run(0, 0, "RADAR_ERROR", err_msg)
-            return {
-                "status": "RADAR_ERROR",
-                "discovered_count": 0,
-                "discovered_tweets": [],
-                "processed": 0,
-                "replies_sent": 0,
-                "details": err_msg,
-                "results": []
-            }
+        else:
+            try:
+                logger.info(f"[PIPELINE] Running Discovery Radar across {len(self.settings.search_keywords)} keywords...")
+                discovered = radar.scan_keywords(
+                    provider=self.provider,
+                    keywords=self.settings.search_keywords,
+                    limit_per_keyword=5,
+                    min_virality_score=self.settings.virality_threshold,
+                    combine_queries=self.settings.combine_search_queries,
+                    max_keywords_per_query=self.settings.max_keywords_per_query,
+                    min_search_delay_seconds=self.settings.min_search_delay_seconds,
+                    max_search_delay_seconds=self.settings.max_search_delay_seconds,
+                    dry_run=self.settings.dry_run,
+                    on_circuit_breaker=self._handle_scanner_circuit_breaker,
+                )
+                logger.info(f"[PIPELINE] Radar discovered and enqueued {len(discovered)} candidate tweets.")
+            except Exception as e:
+                err_msg = f"Discovery Radar failed: {e}"
+                logger.error(err_msg)
+                self.repo.log_run(0, 0, "RADAR_ERROR", err_msg)
+                return {
+                    "status": "RADAR_ERROR",
+                    "discovered_count": 0,
+                    "discovered_tweets": [],
+                    "processed": 0,
+                    "replies_sent": 0,
+                    "details": err_msg,
+                    "results": []
+                }
 
         # 4. Queue Responder Dispatch
         logger.info(f"[PIPELINE] Processing queue (max cycle replies: {self.settings.max_replies_per_cycle})...")

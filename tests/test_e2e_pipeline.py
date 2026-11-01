@@ -5,8 +5,8 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock
 from config.settings import Settings
 from database.repository import Repository
-from providers.base import BaseTwitterProvider, Tweet
-from engine.grounding import GroundingEngine, FactCheckResult
+from providers.base import BaseTwitterProvider, Tweet, ScannerCircuitBreakerError
+from engine.grounding import GroundingEngine, FactCheckResult, DraftVariation
 from engine.orchestrator import BotOrchestrator
 from engine.radar import DiscoveryRadar
 from engine.link_validator import LinkValidator
@@ -185,3 +185,129 @@ def test_full_pipeline_radar_to_approval_and_publish(tmp_path, monkeypatch):
 
     # Step F: Queue should now have 0 DISCOVERED items
     assert len(repo.get_pending_tweets()) == 0
+
+
+def test_e2e_community_saas_variation_sharding_and_scanner_cooldown(tmp_path):
+    """
+    Simulates the Community SaaS & Scanner Shield lifecycle:
+    1. Multiple active Telegram subscribers registered with different styles.
+    2. Pipeline generates 5 distinct draft_variations and diversifies links across whitelisted sources.
+    3. Each subscriber receives a unique variation and is logged in `dispatches`.
+    4. If ScannerRateLimitError (HTTP 429) triggers during radar scan, scanner enters cooldown
+       quarantine in `bot_state` and only the admin receives the technical alert.
+    """
+    db_file = str(tmp_path / "e2e_community_saas.db")
+    repo = Repository(db_file)
+    settings = Settings(
+        database_path=db_file,
+        dry_run=False,
+        virality_threshold=5.0,
+        monthly_max_replies=30,
+        search_keywords=["aid", "famine"],
+        telegram_bot_token="123456:TEST_TOKEN",
+        telegram_chat_id="999000",  # Operator admin chat ID
+        telegram_review_enabled=True,
+        scanner_cooldown_minutes=360,
+    )
+
+    # Register 3 regular community subscribers with different styles
+    repo.upsert_subscriber(chat_id="sub_1", username="user1", preferred_style="empathetic", tier="free")
+    repo.upsert_subscriber(chat_id="sub_2", username="user2", preferred_style="sharp", tier="free")
+    repo.upsert_subscriber(chat_id="sub_3", username="user3", preferred_style="direct_data", tier="pro")
+
+    provider = SimulatedTwitterProvider()
+
+    mock_grounding = MagicMock(spec=GroundingEngine)
+    def mock_eval_variations(text, author):
+        if "blocked all food" in text.lower():
+            return FactCheckResult(
+                is_worth_replying=True,
+                claim_identified="False claim that all aid was blocked",
+                verified_facts=["Over 30,000 aid trucks entered via Kerem Shalom."],
+                recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/",
+                draft_reply="Over 30,000 aid trucks entered Gaza via official crossings.",
+                draft_variations=[
+                    DraftVariation(style="direct_data", text="Over 30,000 aid trucks and 500,000+ tons of food entered Gaza via Kerem Shalom and Erez."),
+                    DraftVariation(style="socratic", text="If aid is completely blocked, how did over 30,000 inspected trucks cross into Gaza via Kerem Shalom?"),
+                    DraftVariation(style="historical", text="Since October, COGAT and UN agencies have coordinated over 30,000 aid trucks into Gaza."),
+                    DraftVariation(style="empathetic", text="Civilians need real relief, which is why over 30,000 aid trucks have entered Gaza—the bottleneck is internal distribution."),
+                    DraftVariation(style="sharp", text="30,000+ aid trucks entered Gaza through inspected crossings. Blaming the border ignores the real distribution bottleneck."),
+                ],
+            )
+        return FactCheckResult(is_worth_replying=False, claim_identified="Troll", draft_reply="")
+
+    mock_grounding.evaluate_and_draft.side_effect = mock_eval_variations
+
+    mock_telegram = MagicMock()
+    mock_telegram.is_configured.return_value = True
+    mock_telegram.sync_subscribers.return_value = 0
+
+    dispatched_payloads = {}
+    def fake_dispatch_variations(
+        repository,
+        tweet_id,
+        author_handle,
+        tweet_text,
+        virality_score,
+        virality_tier,
+        variations,
+        claim_flagged="",
+        verified_facts=None,
+    ):
+        from engine.telegram_dispatcher import TelegramDispatcher
+        real_dispatcher = TelegramDispatcher(bot_token="123456:TEST_TOKEN", chat_ids="999000")
+        mock_http = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        def capture_post(url, json=None, **kwargs):
+            if json and "chat_id" in json:
+                dispatched_payloads[json["chat_id"]] = json
+            return mock_resp
+        mock_http.post.side_effect = capture_post
+        return real_dispatcher.dispatch_variations_to_subscribers(
+            repository=repository,
+            tweet_id=tweet_id,
+            author_handle=author_handle,
+            tweet_text=tweet_text,
+            virality_score=virality_score,
+            virality_tier=virality_tier,
+            variations=variations,
+            claim_flagged=claim_flagged,
+            verified_facts=verified_facts,
+            http_client=mock_http,
+        )
+
+    mock_telegram.dispatch_variations_to_subscribers.side_effect = fake_dispatch_variations
+
+    orchestrator = BotOrchestrator(
+        settings=settings,
+        repository=repo,
+        provider=provider,
+        grounding_engine=mock_grounding,
+        telegram_dispatcher=mock_telegram,
+    )
+
+    radar = DiscoveryRadar(repo)
+
+    # Run non-interactive cycle (Community SaaS mode)
+    report = orchestrator.run_full_pipeline(radar=radar, start_jitter_minutes=0.0, interactive=False, limit_queue=5)
+    assert report["status"] == "SUCCESS"
+    assert report["replies_sent"] == 1
+
+    # Verify all 3 subscribers received unique variations in `dispatches`
+    used_hashes = repo.get_used_variation_hashes("viral_aid_101")
+    assert len(used_hashes) == 3
+    assert len(set(used_hashes)) == 3  # 3 unique variation hashes sharded across 3 subscribers
+    assert len(dispatched_payloads) == 3
+
+    # Now simulate HTTP 429 Circuit Breaker during next radar scan
+    def rate_limited_search(query: str, limit: int = 10):
+        raise ScannerCircuitBreakerError("HTTP 429 Too Many Requests from X GraphQL", status_code=429, reason="RATE_LIMIT_429")
+
+    provider.search_recent_tweets = rate_limited_search
+    orchestrator.run_full_pipeline(radar=radar, start_jitter_minutes=0.0, interactive=False, limit_queue=5)
+
+    # Verify cooldown timestamp was persisted in bot_state and admin alert was triggered
+    cooldown_until = repo.get_state("scanner_cooldown_until")
+    assert cooldown_until is not None
+    assert mock_telegram.send_admin_alert.called

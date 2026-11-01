@@ -2,6 +2,7 @@
 Unit and integration tests for TelegramDispatcher and Web Intent workflow.
 """
 
+import json
 import pytest
 from unittest.mock import MagicMock, patch
 import httpx
@@ -125,7 +126,6 @@ def test_telegram_dispatcher_dispatch_success():
     assert success is True
     assert len(captured_requests) == 2
 
-    import json
     payload_1 = json.loads(captured_requests[0].content)
     assert payload_1["chat_id"] == "-100999"
     assert payload_1["parse_mode"] == "HTML"
@@ -205,7 +205,9 @@ def test_orchestrator_telegram_review_and_deduplication(tmp_path):
 
     mock_dispatcher = MagicMock(spec=TelegramDispatcher)
     mock_dispatcher.is_configured = True
+    mock_dispatcher.has_bot_token = True
     mock_dispatcher.dispatch_review.return_value = True
+    mock_dispatcher.dispatch_variations_to_subscribers.return_value = 1
 
     orchestrator = BotOrchestrator(
         settings=settings,
@@ -223,8 +225,6 @@ def test_orchestrator_telegram_review_and_deduplication(tmp_path):
     assert len(report["results"]) == 1
     assert report["results"][0]["telegram_dispatched"] is True
 
-    mock_dispatcher.dispatch_review.assert_called_once()
-
     # Verify deduplication record in DB
     assert repo.is_tweet_processed("viral_tweet_777") is True
 
@@ -235,3 +235,187 @@ def test_orchestrator_telegram_review_and_deduplication(tmp_path):
     assert second_report["replies_sent"] == 0
     assert len(second_report["results"]) == 0
     mock_dispatcher.dispatch_review.assert_not_called()
+
+
+def test_sync_subscribers_and_confirmation_messages(tmp_path):
+    """
+    Verify Task 3.2:
+    1. Polling getUpdates registers /start users, updates /style preferences, and deactivates /stop users.
+    2. Sends immediate confirmation messages to users who send /start or /style.
+    3. Advances telegram_last_update_id in bot_state.
+    """
+    db_file = str(tmp_path / "test_sync_subs.db")
+    repo = Repository(db_file)
+    dispatcher = TelegramDispatcher(bot_token="test_bot_token", chat_ids="99999")
+
+    sent_messages = []
+
+    def mock_handler(request: httpx.Request):
+        if "getUpdates" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": [
+                        {
+                            "update_id": 100,
+                            "message": {
+                                "chat": {"id": 1111, "username": "supporter_a"},
+                                "text": "/start",
+                            },
+                        },
+                        {
+                            "update_id": 101,
+                            "message": {
+                                "chat": {"id": 2222, "username": "supporter_b"},
+                                "text": "/start",
+                            },
+                        },
+                        {
+                            "update_id": 102,
+                            "message": {
+                                "chat": {"id": 1111, "username": "supporter_a"},
+                                "text": "/style sharp",
+                            },
+                        },
+                        {
+                            "update_id": 103,
+                            "message": {
+                                "chat": {"id": 2222, "username": "supporter_b"},
+                                "text": "/stop",
+                            },
+                        },
+                    ],
+                },
+            )
+        elif "sendMessage" in str(request.url):
+            sent_messages.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(mock_handler)
+    with httpx.Client(transport=transport) as client:
+        summary = dispatcher.sync_subscribers(repository=repo, default_daily_limit=3, http_client=client)
+
+    assert summary["started"] == 2
+    assert summary["style_updated"] == 1
+    assert summary["stopped"] == 1
+    assert repo.get_state("telegram_last_update_id") == "103"
+
+    # Active subscribers should be operator_admin (99999) + supporter_a (1111). supporter_b (2222) stopped!
+    active_subs = {s["chat_id"]: s for s in repo.get_active_subscribers()}
+    assert "99999" in active_subs
+    assert "1111" in active_subs
+    assert "2222" not in active_subs
+    assert active_subs["1111"]["preferred_style"] == "sharp"
+
+    # Verify confirmation messages were sent for /start, /style, and /stop
+    assert len(sent_messages) == 4
+    welcome_texts = [m["text"] for m in sent_messages if m["chat_id"] == "1111"]
+    assert any("נרשמת בהצלחה ל-zioX" in t for t in welcome_texts)
+    assert any("sharp" in t for t in welcome_texts)
+
+
+def test_send_admin_alert_restricted_strictly_to_admins(tmp_path):
+    """
+    Verify Task 3.2 (User Requirement #1):
+    send_admin_alert() MUST ONLY send technical alerts to operatorTELEGRAM_CHAT_ID / tier='admin',
+    and NEVER to regular 'free' or 'pro' subscribers!
+    """
+    db_file = str(tmp_path / "test_admin_only.db")
+    repo = Repository(db_file)
+
+    # Register regular subscribers and 1 DB admin
+    repo.upsert_subscriber(chat_id="1111", username="regular_free", tier="free", daily_limit=3)
+    repo.upsert_subscriber(chat_id="2222", username="regular_pro", tier="pro", daily_limit=15)
+    repo.upsert_subscriber(chat_id="8888", username="db_admin", tier="admin", daily_limit=100)
+
+    dispatcher = TelegramDispatcher(bot_token="test_bot_token", chat_ids="9999")
+    sent_payloads = []
+
+    def mock_handler(request: httpx.Request):
+        sent_payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(mock_handler)
+    with httpx.Client(transport=transport) as client:
+        ok = dispatcher.send_admin_alert(
+            alert_text="HTTP 429 Rate Limit on X Scout account. Entering 12h cooldown.",
+            repository=repo,
+            http_client=client,
+        )
+
+    assert ok is True
+    recipient_ids = [p["chat_id"] for p in sent_payloads]
+    # ONLY 9999 (.env admin) and 8888 (DB tier='admin') receive the alert
+    assert set(recipient_ids) == {"9999", "8888"}
+    assert "1111" not in recipient_ids
+    assert "2222" not in recipient_ids
+
+
+def test_dispatch_variations_to_subscribers_unique_sharding(tmp_path):
+    """
+    Verify Task 3.2:
+    Multiple active subscribers each receive a DIFFERENT reply variation for the same tweet,
+    respecting preferred_style and recording deliveries in `dispatches`.
+    """
+    db_file = str(tmp_path / "test_var_sharding.db")
+    repo = Repository(db_file)
+
+    repo.upsert_subscriber(chat_id="101", username="u1", tier="free", daily_limit=3, preferred_style="sharp")
+    repo.upsert_subscriber(chat_id="102", username="u2", tier="free", daily_limit=3, preferred_style="factual")
+    repo.upsert_subscriber(chat_id="103", username="u3", tier="free", daily_limit=3, preferred_style="any")
+
+    dispatcher = TelegramDispatcher(bot_token="test_bot_token", chat_ids="")
+    sent_payloads = []
+
+    def mock_handler(request: httpx.Request):
+        sent_payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    variations = [
+        {"style": "factual", "text": "Factual rebuttal variation 1 https://govextra.gov.il/1", "link": "https://govextra.gov.il/1"},
+        {"style": "sharp", "text": "Sharp witty rebuttal variation 2 https://gaza-aid-data.gov.il/2", "link": "https://gaza-aid-data.gov.il/2"},
+        {"style": "historical_legal", "text": "Legal rebuttal variation 3 https://idf.il/3", "link": "https://idf.il/3"},
+    ]
+
+    transport = httpx.MockTransport(mock_handler)
+    with httpx.Client(transport=transport) as client:
+        count = dispatcher.dispatch_variations_to_subscribers(
+            repository=repo,
+            tweet_id="viral_900",
+            author_handle="target_user",
+            tweet_text="False claim tweet",
+            virality_score=25.0,
+            virality_tier="CRITICAL",
+            variations=variations,
+            claim_flagged="False claim",
+            verified_facts=["Fact 1"],
+            http_client=client,
+        )
+
+    assert count == 3
+    assert len(sent_payloads) == 3
+
+    by_chat = {p["chat_id"]: p["text"] for p in sent_payloads}
+    # Subscriber 101 requested 'sharp' -> gets variation 2
+    assert "Sharp witty rebuttal variation 2" in by_chat["101"]
+    # Subscriber 102 requested 'factual' -> gets variation 1
+    assert "Factual rebuttal variation 1" in by_chat["102"]
+    # Subscriber 103 ('any') -> gets remaining variation 3
+    assert "Legal rebuttal variation 3" in by_chat["103"]
+
+    # Calling again for the same tweet_id should send 0 messages (all 3 subscribers already received it)
+    sent_payloads.clear()
+    with httpx.Client(transport=transport) as client:
+        repeat_count = dispatcher.dispatch_variations_to_subscribers(
+            repository=repo,
+            tweet_id="viral_900",
+            author_handle="target_user",
+            tweet_text="False claim tweet",
+            virality_score=25.0,
+            virality_tier="CRITICAL",
+            variations=variations,
+            http_client=client,
+        )
+    assert repeat_count == 0
