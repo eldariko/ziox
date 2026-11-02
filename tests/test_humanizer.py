@@ -176,3 +176,20 @@ def test_diversify_links_with_no_link_variation_ratio():
         assert not re.search(r"https?://\S+", item["text"])
     for item in with_links:
         assert len(re.findall(r"https?://\S+", item["text"])) == 1
+
+
+def test_whitelisted_link_prevents_substring_collision_said_vs_aid():
+    # 'said', 'afraid', 'paid' must NOT trigger 'aid' keyword matching
+    claim = "Let us stick to the verified text and actual record rather than misrepresenting what was said."
+    assert Humanizer.match_whitelisted_link(claim) is None
+
+    sanitized = Humanizer.sanitize(claim)
+    assert "https://" not in sanitized
+    assert "cogat" not in sanitized
+
+
+def test_whitelisted_links_pool_no_fallback_to_unrelated_categories():
+    # If text has no keywords in whitelisted_sources.json, pool must be empty (not falling back to COGAT)
+    text = "General discussion about inflation, housing market, and grocery pricing in 2026."
+    pool = Humanizer.match_whitelisted_links_pool(text)
+    assert pool == []

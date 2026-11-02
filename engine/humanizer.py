@@ -154,7 +154,10 @@ class Humanizer:
 
     @staticmethod
     def match_whitelisted_link(text_or_claim: str, lang: str = "en") -> Optional[str]:
-        """Find a verified primary-source URL matching keywords in the text/claim."""
+        """
+        Find a verified primary-source URL matching keywords in the text/claim.
+        Uses boundary checking to prevent substring collisions (e.g. 'aid' in 'said').
+        """
         if not WHITELIST_PATH.exists():
             return None
         try:
@@ -163,7 +166,8 @@ class Humanizer:
             lower_text = text_or_claim.lower()
             for key, data in vault.items():
                 for kw in data.get("keywords", []):
-                    if kw.lower() in lower_text:
+                    pattern = r"(?<!\w)" + re.escape(kw.lower()) + r"(?!\w)"
+                    if re.search(pattern, lower_text):
                         sources = data.get("sources", {})
                         return sources.get(lang) or sources.get("en")
         except Exception:
@@ -175,6 +179,7 @@ class Humanizer:
         """
         Return a pool of distinct whitelisted URLs matching keywords in `text_or_claim`.
         Used to diversify proof URLs across multiple community reply variations.
+        Strictly requires keyword matching; never falls back to arbitrary unrelated categories.
         """
         if not WHITELIST_PATH.exists():
             return []
@@ -184,7 +189,13 @@ class Humanizer:
             lower_text = text_or_claim.lower()
             pool: List[str] = []
             for key, data in vault.items():
-                if any(kw.lower() in lower_text for kw in data.get("keywords", [])):
+                matched = False
+                for kw in data.get("keywords", []):
+                    pattern = r"(?<!\w)" + re.escape(kw.lower()) + r"(?!\w)"
+                    if re.search(pattern, lower_text):
+                        matched = True
+                        break
+                if matched:
                     sources = data.get("sources", {})
                     primary = sources.get(lang) or sources.get("en")
                     if primary and primary not in pool:
@@ -192,13 +203,6 @@ class Humanizer:
                     for alt in data.get("alternate_sources", []):
                         if alt and alt not in pool:
                             pool.append(alt)
-            # If no specific keyword matched, collect primary sources across categories as fallback pool
-            if not pool:
-                for key, data in vault.items():
-                    sources = data.get("sources", {})
-                    primary = sources.get(lang) or sources.get("en")
-                    if primary and primary not in pool:
-                        pool.append(primary)
             return pool
         except Exception:
             return []
