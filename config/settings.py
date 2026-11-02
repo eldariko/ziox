@@ -72,6 +72,10 @@ class Settings(BaseSettings):
         default=0,
         description="Minimum likes filter in search query (e.g. 5) to filter out 0-engagement noise"
     )
+    max_tweet_age_hours: float = Field(
+        default=24.0,
+        description="Maximum age in hours for discovered candidate tweets (default 24h)"
+    )
     scanner_cooldown_minutes: int = Field(
         default=720,
         description="Minutes to quarantine the X scanner account if a rate-limit (429) or auth challenge (401/403) occurs"

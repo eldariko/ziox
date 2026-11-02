@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from providers.base import Tweet
-from engine.virality import calculate_virality_score, is_viral_candidate
+from engine.virality import calculate_virality_score, is_viral_candidate, get_virality_tier
 
 
 def test_virality_score_calculation():
@@ -37,14 +37,12 @@ def test_low_virality_tweet():
         replies=0
     )
     score = calculate_virality_score(tweet)
-    # 5 / (60 + 10) = 5 / 70 = 0.07
     assert score < 1.0
     assert is_viral_candidate(tweet, threshold=5.0) is False
 
 
 def test_virality_tiers():
     now = datetime.now(timezone.utc)
-    from engine.virality import get_virality_tier
 
     # Explosive virality: 1000 likes, 500 retweets, 300 replies, 20 mins ago
     # (1000 + 1000 + 450) / 30 = 2450 / 30 = 81.67
@@ -71,3 +69,49 @@ def test_virality_tiers():
     )
     assert get_virality_tier(low_tweet) == "LOW_TRACTION"
 
+
+def test_sustained_viral_tweets_at_11_and_20_hours():
+    """Verify 11-hour and 20-hour viral tweets pass the 5.0 threshold via hybrid sustained scoring."""
+    now = datetime.now(timezone.utc)
+
+    # 11-hour-old viral tweet (660 mins) with 450 likes, 120 retweets, 40 replies (weighted = 750)
+    tweet_11h = Tweet(
+        id="viral_11h",
+        text="Viral claim from 11 hours ago",
+        author_handle="big_account",
+        created_at=now - timedelta(hours=11),
+        likes=450,
+        retweets=120,
+        replies=40,
+    )
+    score_11h = calculate_virality_score(tweet_11h)
+    assert score_11h >= 5.0
+    assert is_viral_candidate(tweet_11h, threshold=5.0) is True
+    assert get_virality_tier(tweet_11h) in ("VIRAL_EMERGING", "VIRAL_HIGH", "VIRAL_EXPLOSIVE")
+
+    # 20-hour-old viral tweet (1200 mins) with 650 likes, 180 retweets, 60 replies (weighted = 1100)
+    tweet_20h = Tweet(
+        id="viral_20h",
+        text="Viral claim from 20 hours ago",
+        author_handle="big_account_2",
+        created_at=now - timedelta(hours=20),
+        likes=650,
+        retweets=180,
+        replies=60,
+    )
+    score_20h = calculate_virality_score(tweet_20h)
+    assert score_20h >= 5.0
+    assert is_viral_candidate(tweet_20h, threshold=5.0) is True
+
+    # Low-engagement 11-hour-old tweet (20 likes, 2 RTs) should still be rejected (< 5.0)
+    low_11h = Tweet(
+        id="low_11h",
+        text="Old non-viral tweet",
+        author_handle="small_user",
+        created_at=now - timedelta(hours=11),
+        likes=20,
+        retweets=2,
+        replies=1,
+    )
+    assert calculate_virality_score(low_11h) < 1.0
+    assert is_viral_candidate(low_11h, threshold=5.0) is False

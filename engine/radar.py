@@ -180,18 +180,21 @@ class DiscoveryRadar:
         dry_run: bool = True,
         on_circuit_breaker: Optional[Callable[[ScannerCircuitBreakerError], None]] = None,
         min_faves: int = 0,
+        max_tweet_age_hours: float = 24.0,
     ) -> List[Dict[str, Any]]:
         """
         Scan recent posts across search keywords using a provider,
         calculate virality velocity, and enqueue candidate posts.
 
-        Phase A Safety Upgrades:
+        Phase A Safety & Sustained Virality Upgrades:
         1. Consolidates keywords into script-grouped Boolean OR queries when `combine_queries=True`.
         2. Replaces static 1.2s sleep with Gaussian jitter (`min_search_delay_seconds`..`max_search_delay_seconds`).
         3. Immediately aborts the scan cycle if a `ScannerCircuitBreakerError` (401/403/429/Lock) occurs.
+        4. Skips tweets older than `max_tweet_age_hours` (default 24h) before scoring.
         """
         self.last_circuit_breaker_error = None
         enqueued_items: List[Dict[str, Any]] = []
+        max_age_minutes = max_tweet_age_hours * 60.0
 
         queries_to_run = (
             self.build_consolidated_queries(keywords, max_per_query=max_keywords_per_query, min_faves=min_faves)
@@ -211,6 +214,8 @@ class DiscoveryRadar:
             try:
                 tweets = provider.search_recent_tweets(query_str, limit=limit_per_keyword)
                 for tweet in tweets:
+                    if tweet.age_in_minutes > max_age_minutes:
+                        continue
                     if self.repo.is_tweet_processed(tweet.id):
                         continue
 

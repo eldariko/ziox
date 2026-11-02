@@ -1,5 +1,6 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
+from unittest.mock import MagicMock, patch
 from config.settings import Settings
 from database.repository import Repository
 from providers.base import (
@@ -13,13 +14,14 @@ from engine.radar import DiscoveryRadar, extract_tweet_id, calculate_search_jitt
 
 
 def test_phase_a_settings_defaults():
-    """Verify Task 1.1: Phase A scanner safety settings load with expected defaults."""
+    """Verify Task 1.1 & 1.2: Phase A scanner safety settings and max_tweet_age_hours load with expected defaults."""
     s = Settings(_env_file=None)
     assert s.combine_search_queries is True
     assert s.max_keywords_per_query == 6
     assert s.min_search_delay_seconds == 6.0
     assert s.max_search_delay_seconds == 15.0
     assert s.scanner_cooldown_minutes == 720
+    assert s.max_tweet_age_hours == 24.0
 
 
 def test_extract_tweet_id():
@@ -79,6 +81,100 @@ def test_radar_scan_keywords(tmp_path):
     assert len(discovered) > 0
     pending = repo.get_pending_tweets(limit=10)
     assert len(pending) == len(discovered)
+
+
+def test_radar_filters_tweets_older_than_max_tweet_age_hours(tmp_path):
+    """Verify tweets older than max_tweet_age_hours (e.g. 30h > 24h) are skipped while 15h viral tweets are enqueued."""
+    db_file = str(tmp_path / "test_radar_age.db")
+    repo = Repository(db_file)
+    radar = DiscoveryRadar(repo)
+
+    now = datetime.now(timezone.utc)
+
+    class _AgeTestProvider(BaseTwitterProvider):
+        def search_recent_tweets(self, query: str, limit: int = 10) -> List[Tweet]:
+            return [
+                Tweet(
+                    id="tweet_15h_viral",
+                    text="Viral 15h post about Israel",
+                    author_handle="user15",
+                    created_at=now - timedelta(hours=15),
+                    likes=500,
+                    retweets=150,
+                    replies=50,
+                ),
+                Tweet(
+                    id="tweet_30h_stale",
+                    text="Stale 30h post about Israel",
+                    author_handle="user30",
+                    created_at=now - timedelta(hours=30),
+                    likes=5000,
+                    retweets=2000,
+                    replies=500,
+                ),
+            ]
+
+        def post_reply(self, text: str, reply_to_tweet_id: str, media_paths: Optional[List[str]] = None) -> Dict[str, Any]:
+            return {}
+
+        def get_tweet(self, tweet_id: str) -> Optional[Tweet]:
+            return None
+
+    discovered = radar.scan_keywords(
+        provider=_AgeTestProvider(),
+        keywords=["Israel"],
+        limit_per_keyword=10,
+        min_virality_score=5.0,
+        max_tweet_age_hours=24.0,
+        dry_run=True,
+    )
+
+    assert len(discovered) == 1
+    assert discovered[0]["tweet_id"] == "tweet_15h_viral"
+
+
+def test_twikit_search_recent_tweets_blends_top_and_latest():
+    """Verify TwikitTwitterProvider queries both Top and Latest tabs and deduplicates by tweet ID."""
+    from providers import twikit_provider
+
+    now = datetime.now(timezone.utc)
+
+    def _make_raw(tid: str, text: str, likes: int):
+        raw = MagicMock()
+        raw.id = tid
+        raw.text = text
+        raw.created_at_datetime = now - timedelta(hours=11)
+        raw.favorite_count = likes
+        raw.retweet_count = 100
+        raw.reply_count = 40
+        raw.conversation_id = tid
+        raw.in_reply_to = None
+        raw.user = MagicMock()
+        raw.user.screen_name = f"author_{tid}"
+        return raw
+
+    top_list = [_make_raw("101", "Top viral 11h post", 450), _make_raw("102", "Shared post", 300)]
+    latest_list = [_make_raw("102", "Shared post", 300), _make_raw("103", "Fresh latest post", 80)]
+
+    provider = object.__new__(twikit_provider.TwikitTwitterProvider)
+    provider.client = MagicMock()
+
+    calls = []
+
+    def fake_run_coro(coro):
+        # We inspect mock call args recorded on provider.client.search_tweet
+        last_call = provider.client.search_tweet.call_args
+        product = last_call.kwargs.get("product")
+        calls.append(product)
+        if product == "Top":
+            return top_list
+        return latest_list
+
+    with patch.object(twikit_provider, "_run_coro", side_effect=fake_run_coro):
+        results = provider.search_recent_tweets("Israel", limit=10)
+
+    assert calls == ["Top", "Latest"]
+    assert [t.id for t in results] == ["101", "102", "103"]
 
 
 def test_build_consolidated_queries_script_grouping():
