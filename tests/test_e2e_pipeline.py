@@ -80,8 +80,7 @@ def test_full_pipeline_radar_to_approval_and_publish(tmp_path, monkeypatch):
     """
     Simulates the COMPLETE end-to-end lifecycle:
     1. Discovery Radar scans network feed & enqueues viral candidate tweets into SQLite.
-    2. Low-virality and duplicate tweets are properly filtered.
-    3. Responder / Orchestrator pulls queued tweets.
+    2. Low-virality and duplicate tweets are properly filtered.\n    3. Responder / Orchestrator pulls queued tweets.
     4. Evaluates thread permissions & toxicity.
     5. Runs Fact Grounding (rebutting false aid claims).
     6. LinkValidator validates attached link (ensures no dead link or bot challenge).
@@ -488,3 +487,140 @@ def test_e2e_scale_multi_wave_cohort_sharding_and_language_routing(tmp_path):
         cursor = conn.cursor()
         cursor.execute("SELECT status FROM processed_tweets WHERE tweet_id = 'viral_aid_101'")
         assert cursor.fetchone()["status"] == "DISPATCHED_TELEGRAM"
+
+
+def test_e2e_demand_driven_scaling_serves_all_available_subscribers_in_single_run(tmp_path):
+    """
+    Verify Task 2.2:
+    - When 100 ready subscribers are available and `target_cohort_size_per_tweet = 25` (requiring 4 waves),
+      even if `telegram_tweets_per_cycle = 2` (which would previously cap at 2 * 25 = 50 subscribers) and
+      only 2 viral tweets are discovered (one 20m old, one 11h old):
+      1. `run_full_pipeline` dynamically scales `limit_per_keyword` and `effective_cap` to 4 waves.
+      2. Both the 20m and 11h viral tweets pass the hybrid virality filter.
+      3. `process_queue(allow_multi_wave_in_run=True)` runs Wave 1 on both tweets (serving 50 subscribers)
+         and automatically iterates Wave 2 on both `DISPATCHED_WAVE` tweets in the SAME run, serving all 100
+         available subscribers (100% coverage in a single run).
+    """
+    from engine.telegram_dispatcher import TelegramDispatcher
+
+    db_file = str(tmp_path / "e2e_demand_100.db")
+    repo = Repository(db_file)
+    settings = Settings(
+        database_path=db_file,
+        dry_run=False,
+        virality_threshold=5.0,
+        monthly_max_replies=500,
+        search_keywords=["Israel"],
+        telegram_bot_token="123456:TEST_TOKEN",
+        telegram_chat_id="999000",
+        telegram_review_enabled=True,
+        target_cohort_size_per_tweet=25,
+        telegram_tweets_per_cycle=2,  # Intentionally small static default to prove dynamic override!
+        max_tweet_age_hours=24.0,
+    )
+
+    styles = ["direct_data", "socratic", "historical", "empathetic", "sharp"]
+    for i in range(100):
+        repo.upsert_subscriber(
+            chat_id=f"ready_sub_{i}",
+            username=f"user_{i}",
+            preferred_style=styles[i % len(styles)],
+            preferred_lang="en",
+            ready_confirmed=True,
+            daily_limit=3,
+        )
+
+    now = datetime.now(timezone.utc)
+    recorded_limits = []
+
+    class _DemandProvider(BaseTwitterProvider):
+        def search_recent_tweets(self, query: str, limit: int = 10):
+            recorded_limits.append(limit)
+            return [
+                Tweet(
+                    id="viral_fresh_20m",
+                    text="False claim: Israel blocked all food trucks today!",
+                    author_handle="critic_fresh",
+                    created_at=now - timedelta(minutes=20),
+                    likes=500,
+                    retweets=200,
+                    replies=80,
+                ),
+                Tweet(
+                    id="viral_sustained_11h",
+                    text="False claim from 11 hours ago: zero humanitarian aid entered Gaza!",
+                    author_handle="critic_11h",
+                    created_at=now - timedelta(hours=11),
+                    likes=450,
+                    retweets=120,
+                    replies=50,
+                ),
+            ]
+
+        def get_tweet(self, tweet_id: str):
+            return None
+
+        def post_reply(self, text: str, reply_to_tweet_id: str, media_paths=None):
+            return {}
+
+    provider = _DemandProvider()
+    batch_counter = {"n": 0}
+    mock_grounding = MagicMock(spec=GroundingEngine)
+
+    def fake_batch(tweet_text, author_handle, total_variations=25, max_per_call=10):
+        batch_counter["n"] += 1
+        b_id = batch_counter["n"]
+        vars_list = [
+            DraftVariation(
+                style=styles[idx % len(styles)],
+                text=f"Batch {b_id} var {idx}: Over 30,000 aid trucks entered Gaza via Kerem Shalom."
+            )
+            for idx in range(total_variations)
+        ]
+        return FactCheckResult(
+            is_worth_replying=True,
+            claim_identified="False aid claim",
+            verified_facts=["30,000+ trucks entered"],
+            recommended_link="https://govextra.gov.il/cogat/humanitarian-efforts/home/",
+            draft_reply=vars_list[0].text,
+            draft_variations=vars_list,
+        )
+
+    mock_grounding.generate_variations_batch.side_effect = fake_batch
+    mock_grounding.evaluate_and_draft.side_effect = lambda text, author: fake_batch(text, author, total_variations=25)
+
+    real_dispatcher = TelegramDispatcher(bot_token="123456:TEST_TOKEN", chat_ids="999000")
+    mock_http = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status.return_value = None
+    mock_http.post.return_value = mock_resp
+
+    mock_telegram = MagicMock()
+    mock_telegram.is_configured.return_value = True
+    mock_telegram.sync_subscribers.return_value = 0
+    mock_telegram.dispatch_variations_to_subscribers.side_effect = (
+        lambda **kwargs: real_dispatcher.dispatch_variations_to_subscribers(**kwargs, http_client=mock_http)
+    )
+
+    orchestrator = BotOrchestrator(
+        settings=settings,
+        repository=repo,
+        provider=provider,
+        grounding_engine=mock_grounding,
+        telegram_dispatcher=mock_telegram,
+    )
+    radar = DiscoveryRadar(repo)
+
+    report = orchestrator.run_full_pipeline(radar=radar, start_jitter_minutes=0.0, interactive=False)
+
+    assert report["status"] == "SUCCESS"
+    assert report["discovered_count"] == 2  # Both 20m and 11h viral tweets discovered!
+    assert recorded_limits[0] >= 15  # Dynamic limit_per_keyword scaled up from 5
+    assert report["replies_sent"] == 4  # 2 waves x 2 tweets = 4 wave dispatches in one run
+    assert report["subscribers_served"] == 100  # All 100 available subscribers received a post!
+
+    # Verify in DB that all 100 distinct subscribers received at least 1 dispatch today
+    with repo._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(DISTINCT chat_id) AS cnt FROM dispatches")
+        assert cursor.fetchone()["cnt"] == 100

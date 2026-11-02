@@ -20,10 +20,9 @@ from engine.orchestrator import BotOrchestrator
 from engine.radar import DiscoveryRadar, extract_tweet_id
 from engine.telegram_dispatcher import TelegramDispatcher
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+from engine.security import setup_secure_logging
+
+setup_secure_logging(logging.INFO)
 logger = logging.getLogger("zioX")
 
 
@@ -49,6 +48,7 @@ def show_status(repo: Repository, settings) -> None:
     """Print current operational status and statistics."""
     monthly_count = repo.get_monthly_reply_count()
     logs = repo.get_recent_logs(limit=5)
+    demand = repo.get_available_subscriber_demand(max_unconfirmed=settings.max_unconfirmed_dispatches)
 
     print("\n" + "=" * 55)
     print("                zioX STATUS REPORT")
@@ -59,6 +59,8 @@ def show_status(repo: Repository, settings) -> None:
     print(f"Dry Run Mode         : {settings.dry_run}")
     print(f"Monthly Reply Usage  : {monthly_count} / {settings.monthly_max_replies}")
     print(f"Virality Threshold   : {settings.virality_threshold}")
+    print(f"Max Tweet Age        : {settings.max_tweet_age_hours}h")
+    print(f"Available Subscribers: {demand['total']} (EN: {demand['en']} | AR: {demand['ar']})")
     print(f"Max Thread Turns     : {settings.max_thread_turns}")
     print("-" * 55)
     print("Recent Execution Logs:")
@@ -67,7 +69,7 @@ def show_status(repo: Repository, settings) -> None:
     else:
         for log in logs:
             err = f" | Error: {log['error_message']}" if log['error_message'] else ""
-            print(f"  [{log['run_timestamp']}] Status: {log['status']} | Scanned: {log['tweets_scanned']} | Replies: {log['replies_sent']}{err}")
+            print(f"  [{log['run_timestamp']} UTC] Status: {log['status']} | Scanned: {log['tweets_scanned']} | Replies/Dispatches: {log['replies_sent']}{err}")
     print("=" * 55 + "\n")
 
 
@@ -145,6 +147,11 @@ def main():
         help="Maximum random start delay in minutes before executing pipeline (overrides setting)"
     )
     parser.add_argument(
+        "--no-jitter",
+        action="store_true",
+        help="Disable start jitter delay completely for immediate execution"
+    )
+    parser.add_argument(
         "--run-once",
         action="store_true",
         help="Execute a single monitoring, verification, and engagement cycle"
@@ -164,6 +171,23 @@ def main():
         type=float,
         default=2.0,
         help="Polling interval in seconds for --poll-telegram (default: 2.0s)"
+    )
+    parser.add_argument(
+        "--set-webhook",
+        type=str,
+        default=None,
+        help="Register a serverless HTTPS Webhook URL (e.g. Cloudflare Worker) with Telegram Bot API"
+    )
+    parser.add_argument(
+        "--webhook-secret",
+        type=str,
+        default=None,
+        help="Optional secret token for X-Telegram-Bot-Api-Secret-Token verification when using --set-webhook"
+    )
+    parser.add_argument(
+        "--delete-webhook",
+        action="store_true",
+        help="Delete the active Telegram Webhook and re-enable getUpdates polling"
     )
     parser.add_argument(
         "--live",
@@ -217,6 +241,35 @@ def main():
         show_status(repo, settings)
         return
 
+    if args.set_webhook or args.delete_webhook:
+        if not settings.telegram_bot_token:
+            logger.error("TELEGRAM_BOT_TOKEN is not configured in .env. Exiting.")
+            sys.exit(1)
+        dispatcher = TelegramDispatcher(
+            bot_token=settings.telegram_bot_token,
+            chat_ids=settings.telegram_chat_id
+        )
+        if args.set_webhook:
+            ok = dispatcher.set_webhook(
+                webhook_url=args.set_webhook,
+                secret_token=args.webhook_secret,
+            )
+            if ok:
+                print(f"[zioX Telegram] Successfully registered Webhook: {args.set_webhook}")
+            else:
+                print("[zioX Telegram] Failed to register Webhook. Check logs for details.")
+                sys.exit(1)
+            return
+
+        if args.delete_webhook:
+            ok = dispatcher.delete_webhook()
+            if ok:
+                print("[zioX Telegram] Successfully deleted Webhook. getUpdates polling is now active.")
+            else:
+                print("[zioX Telegram] Failed to delete Webhook. Check logs for details.")
+                sys.exit(1)
+            return
+
     if args.sync_telegram or args.poll_telegram:
         if not settings.telegram_bot_token:
             logger.error("TELEGRAM_BOT_TOKEN is not configured in .env. Exiting.")
@@ -225,6 +278,8 @@ def main():
             bot_token=settings.telegram_bot_token,
             chat_ids=settings.telegram_chat_id
         )
+        # Register bot commands in Telegram UI
+        dispatcher.setup_bot_commands()
         if args.sync_telegram:
             print("[zioX Telegram] Syncing updates from Telegram servers...")
             summary = dispatcher.sync_subscribers(
@@ -299,11 +354,15 @@ def main():
 
     if args.radar:
         radar = DiscoveryRadar(repo)
-        print(f"\n[zioX Radar] Scanning {len(settings.search_keywords)} target keywords (Provider: {settings.twitter_provider})...")
+        demand = repo.get_available_subscriber_demand(max_unconfirmed=settings.max_unconfirmed_dispatches)
+        import math
+        needed_waves = max(settings.telegram_tweets_per_cycle, math.ceil(demand["total"] / max(1, settings.target_cohort_size_per_tweet)))
+        dynamic_limit = max(15, min(50, needed_waves * 2))
+        print(f"\n[zioX Radar] Scanning {len(settings.search_keywords)} target keywords (Provider: {settings.twitter_provider}, Demand: {demand['total']}, Limit/Query: {dynamic_limit})...")
         discovered = radar.scan_keywords(
             provider=provider,
             keywords=settings.search_keywords,
-            limit_per_keyword=5,
+            limit_per_keyword=dynamic_limit,
             min_virality_score=settings.virality_threshold,
             combine_queries=settings.combine_search_queries,
             max_keywords_per_query=settings.max_keywords_per_query,
@@ -311,6 +370,7 @@ def main():
             max_search_delay_seconds=settings.max_search_delay_seconds,
             dry_run=settings.dry_run,
             min_faves=settings.search_min_faves,
+            max_tweet_age_hours=settings.max_tweet_age_hours,
         )
         print(f"[zioX Radar] Scan complete. Enqueued {len(discovered)} candidate tweets into database.")
         for item in discovered:
@@ -337,17 +397,19 @@ def main():
         radar = DiscoveryRadar(repo)
         mode_label = "Interactive" if args.interactive else "Autonomous"
         print(f"\n[zioX Pipeline] Starting unified pipeline (Mode: {mode_label}, Provider: {settings.twitter_provider}, Dry Run: {settings.dry_run})...")
+        start_jitter = 0.0 if args.no_jitter else args.start_jitter
         report = orchestrator.run_full_pipeline(
             radar=radar,
-            start_jitter_minutes=args.start_jitter,
+            start_jitter_minutes=start_jitter,
             interactive=args.interactive
         )
         print(f"[zioX Pipeline] Pipeline finished with status: {report['status']}")
-        print(f"                Discovered tweets: {report.get('discovered_count', 0)}")
-        print(f"                Tweets processed : {report.get('processed', 0)}")
-        print(f"                Replies sent     : {report.get('replies_sent', 0)}")
+        print(f"                Discovered tweets : {report.get('discovered_count', 0)}")
+        print(f"                Tweets processed  : {report.get('processed', 0)}")
+        print(f"                Dispatched waves  : {report.get('replies_sent', 0)}")
+        print(f"                Subscribers served: {report.get('subscribers_served', 0)}")
         if report.get("details"):
-            print(f"                Details          : {report['details']}")
+            print(f"                Details           : {report['details']}")
         if report.get("results"):
             print("\nGenerated Responses:")
             for item in report["results"]:
