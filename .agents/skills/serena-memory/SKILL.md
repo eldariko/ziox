@@ -1,6 +1,6 @@
 ---
 name: serena-memory
-description: MUST be consulted at the beginning and completion of any architectural, planning, code-writing, or refactoring task in zioX. Loads project memories and conventions from .serena/memories, and updates them when architecture or conventions evolve.
+description: Consult ONLY when modifying zioX source code, database schemas, or system architecture. Do NOT invoke for conversational Q&A, explanations, or Markdown/IDE configuration questions.
 ---
 
 # Serena Project Memory System
@@ -9,8 +9,8 @@ This skill enforces persistent cross-chat memory for the **zioX** project using 
 
 ## 1. Entry Point & Discovery (Graph Root)
 
-At the beginning of any non-trivial task (planning, coding, refactoring, or debugging):
-1. **Always read the entry point memory**: [core.md](file:///C:/Users/User/PycharmProjects/zioX/.serena/memories/core.md)
+When starting a task that **modifies zioX Python source code, Worker scripts, database schemas, or system architecture** (skip for pure Q&A, discussions, or non-code tasks):
+1. **Read the entry point memory**: [core.md](file:///C:/Users/User/PycharmProjects/zioX/.serena/memories/core.md)
 2. Follow references (`mem:<topic>`) to specific sub-memories as required by the task:
    - [conventions.md](file:///C:/Users/User/PycharmProjects/zioX/.serena/memories/conventions.md) – Coding style, patterns, error handling, typing rules.
    - [tech_stack.md](file:///C:/Users/User/PycharmProjects/zioX/.serena/memories/tech_stack.md) – Dependencies, architecture decisions, database (Turso/libSQL), providers.

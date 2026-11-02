@@ -18,6 +18,9 @@ Run all commands from the project root using PowerShell or Windows command line:
 - **Process queue**: main.py --process-queue
 - **Telegram sync once**: main.py --sync-telegram
 - **Telegram real-time daemon**: main.py --poll-telegram --poll-interval 10
+- **Register Cloudflare Telegram Webhook**: .\.venv\Scripts\python.exe main.py --set-webhook https://<worker>.<subdomain>.workers.dev [--webhook-secret <secret>]
+- **Remove Telegram Webhook (revert to polling)**: .\.venv\Scripts\python.exe main.py --delete-webhook
+- **Deploy Cloudflare Worker**: cd workers/telegram_webhook && npx wrangler deploy
 - **Status (shows active DB)**: main.py --status
 - **OpenSpec**: openspec list --json; openspec validate --specs; openspec archive <change> --yes (syncs deltas then archives)
 - Use .\.venv\Scripts\python.exe -m pytest (global pytest lacks deps).

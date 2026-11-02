@@ -1,29 +1,64 @@
 # zioX: AI Fact-Checking, Advocacy & Engagement Agent for X (Twitter)
 
-zioX is an automated intelligence agent built to monitor, fact-check, and rebut viral misinformation regarding Israel and the Middle East on X (Twitter). The system operates as "the adult in the room" using grounded factual verification, thread state management, and strict anti-bot natural cadence.
+zioX is an automated intelligence agent and community advocacy platform built to monitor, fact-check, and counter viral misinformation regarding Israel and the Middle East on X (Twitter). The system operates as "the adult in the room" using grounded factual verification, thread state management, strict anti-bot natural cadence, and community-driven human-in-the-loop distribution.
+
+zioX operates in two modes:
+- **Autonomous Direct Mode**: Analyzes candidate tweets and directly publishes factual replies via official or session automation with stealth pacing and rate limiting.
+- **Community SaaS Telegram Mode**: A single dedicated scout account scans for viral claims; eligible community subscribers receive unique, fact-checked reply variations in Telegram and publish them with a one-tap **X Web Intent** button from their own personal accounts (zero automated bot posts on X).
 
 ---
 
 ## Key Features
 
-1. **Viral Momentum Scoring**: Detects rapidly rising tweets based on dynamic velocity:
-   $$\text{Virality Score} = \frac{\text{Likes} \times 1.0 + \text{Retweets} \times 2.0 + \text{Replies} \times 1.5}{\text{Age in Minutes} + 10}$$
-2. **Thread Continuity State Machine**:
-   - **Turn 1 (Root Reply)**: Factual counter-claim.
+1. **Hybrid Virality Momentum Scoring**:
+   Detects breaking scoops as well as sustained viral posts up to 24 hours old without premature linear decay:
+   - **Instantaneous Velocity** ($<60\text{ min}$):
+     $$\text{Velocity} = \frac{\text{Likes} \times 1.0 + \text{Retweets} \times 2.0 + \text{Replies} \times 1.5}{\text{Age in Minutes} + 10}$$
+   - **Sustained Viral Impact** ($1\text{h} - 24\text{h}$):
+     $$\text{Sustained} = \frac{\text{Weighted Engagements}}{(\text{Age in Hours})^{0.65} \times 18.0}$$
+   - **Effective Virality Score**:
+     $$\text{Virality Score} = \max(\text{Velocity}, \text{Sustained})$$
+   Tweets are categorized into actionable tiers: `VIRAL_EXPLOSIVE` ($\ge 20$), `VIRAL_HIGH` ($\ge 10$), `VIRAL_EMERGING` ($\ge 5$), and `LOW_TRACTION` ($< 5$).
+
+2. **Combined Top + Latest Search Blending**:
+   - Twikit search queries both X's `Top` (sustained viral tweets) and `Latest` (breaking tweets) tabs.
+   - Automatically deduplicates tweet IDs and enforces `MAX_TWEET_AGE_HOURS` (default: 24h) to avoid stale discussions.
+
+3. **Demand-Driven Dynamic Scaling (1 to 1,000+ Subscribers)**:
+   - Computes real-time subscriber demand across languages (`en`, `ar`, `both`) with a single efficient SQL query (`get_available_subscriber_demand`).
+   - Dynamically scales search depth (`limit_per_keyword`) and pipeline cycle tweet caps (`telegram_tweets_per_cycle = ceil(demand / cohort_size)`).
+   - Multi-wave dispatch loop (`allow_multi_wave_in_run=True`) ensures 100% of available, ready subscribers receive at least one candidate post per run without starvation or N+1 query bottlenecks.
+
+4. **Thread Continuity State Machine**:
+   - **Turn 1 (Root Reply)**: Factual counter-claim with primary source context.
    - **Turn 2 (Follow-up)**: Deepened factual response if the user engages substantively.
    - **Turn 3+ (Disengage)**: Automatically halts engagement to avoid endless circular arguments.
    - **Toxicity / Trolling Shield**: Instantly terminates discussions containing abusive language or bad faith trolling.
-3. **Fact Grounding with Gemini 2.0 / 1.5**:
-   - Real-time fact extraction and corroboration.
-   - Structured JSON decision-making (`is_worth_replying`, `verified_facts`, `recommended_link`).
-4. **Anti-Bot Humanizer Engine**:
+
+5. **Fact Grounding with Gemini 2.5 / 2.0**:
+   - Real-time fact extraction, claim analysis, and evidence corroboration.
+   - Generates distinct batch reply variations per viral tweet with link/no-link variation ratios (`no_link_variation_ratio = 0.4`).
+   - Validates citation URLs and primary evidence links before distribution.
+
+6. **Anti-Bot Humanizer Engine**:
    - Zero em-dashes (`—`) or en-dashes (`–`).
-   - Removes canned robotic phrases ("It's crucial to understand", "Delving into", "Moreover").
+   - Strips canned AI filler phrases (*"It's crucial to understand"*, *"Delving into"*, *"Moreover"*).
    - Enforces a concise 1–3 sentence ceiling.
-   - Adapts to the target tweet's language (English, French, Spanish, Arabic, Hebrew, etc.).
-5. **Dry-Run & Cost Safeguards**:
-   - Default `--dry-run` mode ensures zero unintended posts while developing.
-   - Hard monthly reply ceiling (default: 30 replies/month) and SQLite deduplication.
+   - Adapts naturally to the target tweet's language (English, Arabic, Hebrew, French, Spanish).
+
+7. **Serverless 24/7 Cloudflare Worker Telegram Webhook**:
+   - Zero-dependency ES Module Cloudflare Worker (`workers/telegram_webhook/worker.js`) responding to Telegram updates in $<100\text{ms}$.
+   - Executes interactive command menus and button callbacks directly against Turso Cloud HTTP API (`/v2/pipeline`).
+   - Runs 24/7 at $0.00 cost within Cloudflare Workers' free tier (100k requests/day) without consuming GitHub Actions minutes.
+
+8. **Enterprise Logging & Credential Protection**:
+   - Built-in `SensitiveDataRedactor` logging filter automatically masks Telegram Bot Tokens (`bot[REDACTED]`) across all logs, console outputs, and exceptions.
+   - Mutes chatty external HTTP loggers (`httpx`, `httpcore`, `urllib3`) to prevent sensitive URL credential leakage.
+
+9. **Scanner Safety Shield & Circuit Breaker**:
+   - Consolidates search keywords into Boolean `OR` queries per script to minimize X request volume.
+   - Gaussian jitter pacing (`min_search_delay_seconds`, `max_search_delay_seconds`).
+   - Automated Circuit Breaker quarantines the scanner account for `scanner_cooldown_minutes` (default 12 hours) upon receiving HTTP 401, 403, or 429 errors.
 
 ---
 
@@ -31,31 +66,42 @@ zioX is an automated intelligence agent built to monitor, fact-check, and rebut 
 
 ```
 zioX/
-├── GEMINI.md                    # Antigravity rules (English enforcement, guidelines)
-├── pyproject.toml               # Project metadata & dependencies
-├── requirements.txt             # Pip dependency list
-├── .env.example                 # Environment configuration template
+├── GEMINI.md                          # Antigravity agent configuration and operational rules
+├── pyproject.toml                     # Project metadata and dependencies
+├── requirements.txt                   # Pip dependency lockfile
+├── .env.example                       # Environment configuration template
 ├── assets/
-│   └── proofs/                  # Verified document & infographic store
+│   └── proofs/                        # Verified documents & infographic asset store
 ├── config/
-│   └── settings.py              # Pydantic environment configuration
+│   └── settings.py                    # Pydantic v2 application settings and validation
 ├── database/
-│   ├── schema.py                # SQLite schema (threads, processed_tweets, bot_logs)
-│   └── repository.py            # SQLite data access repository
+│   ├── schema.py                      # SQLite / Turso schema definition
+│   ├── repository.py                  # libSQL / SQLite data access layer & migrations
+│   └── turso_client.py                # Native HTTP client for Turso Cloud libSQL API
 ├── providers/
-│   ├── base.py                  # Abstract Twitter Provider interface & Tweet model
-│   ├── mock_provider.py         # Mock provider for safe offline testing
-│   ├── zernio_provider.py       # Zernio REST API integration
-│   └── twikit_provider.py       # Direct X session automation provider (Twikit)
+│   ├── base.py                        # Abstract TwitterProvider interface & Tweet data model
+│   ├── mock_provider.py               # Deterministic mock provider for offline testing
+│   ├── zernio_provider.py             # Zernio REST API integration
+│   └── twikit_provider.py             # Direct X session automation provider (Top + Latest blending)
 ├── engine/
-│   ├── virality.py              # Virality momentum scoring
-│   ├── thread_state.py          # State machine & toxicity guard
-│   ├── grounding.py             # Gemini reasoning & fact-checking
-│   ├── humanizer.py             # Anti-bot sanitation pipeline
-│   ├── radar.py                 # Discovery Radar & queue ingestion
-│   └── orchestrator.py          # Unified execution pipeline
-├── tests/                       # Unit test suite
-└── main.py                      # CLI entry point
+│   ├── security.py                    # Sensitive credential redaction & secure logging
+│   ├── virality.py                    # Hybrid virality momentum scoring (velocity + sustained)
+│   ├── thread_state.py                # Thread state machine & bad-faith toxicity shield
+│   ├── grounding.py                   # Gemini structured reasoning & multi-variation generation
+│   ├── humanizer.py                   # Anti-bot tone sanitation and link ratio modulation
+│   ├── link_validator.py              # Evidence URL validation and domain health checks
+│   ├── radar.py                       # Discovery Radar & Boolean OR query engine
+│   ├── telegram_dispatcher.py         # Telegram Bot API integration & interactive menus
+│   └── orchestrator.py                # Unified demand-driven pipeline coordinator
+├── workers/
+│   └── telegram_webhook/              # Serverless Cloudflare Worker for Telegram Webhook
+│       ├── worker.js                  # 24/7 webhook handler talking directly to Turso HTTP
+│       └── wrangler.toml              # Cloudflare Worker deployment configuration
+├── openspec/                          # OpenSpec specifications and archived changes
+│   ├── specs/                         # Active capability specifications
+│   └── changes/archive/               # Historical change proposals, designs, and tasks
+├── tests/                             # Full automated pytest suite (89 passing tests)
+└── main.py                            # CLI entry point and daemon runner
 ```
 
 ---
@@ -63,104 +109,199 @@ zioX/
 ## Getting Started
 
 ### 1. Installation
-Install project dependencies in your Python virtual environment:
+
+Install project dependencies in your Python virtual environment (Python 3.12+ recommended):
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
 ### 2. Configure Environment
+
 Copy `.env.example` to `.env`:
 ```powershell
 Copy-Item .env.example .env
 ```
-Fill in your credentials:
-- `GEMINI_API_KEY`: Google AI Studio API Key.
-- `TWITTER_PROVIDER`: `mock` (offline testing), `twikit` (direct session cookies for third-party replies), or `zernio`.
-- **For Twikit Session Automation**:
-  - `X_AUTH_TOKEN`: Your `auth_token` cookie from x.com.
-  - `X_CT0`: Your `ct0` CSRF cookie from x.com.
-  - `X_COOKIES_FILE`: Optional path to saved `cookies.json`.
-- **For Zernio API**:
-  - `ZERNIO_API_KEY` & `ZERNIO_TWITTER_ACCOUNT_ID`.
 
-### 3. Running zioX
+Configure your credentials:
+- **Gemini AI**: `GEMINI_API_KEY` (Google AI Studio) and optional `GEMINI_MODEL` (default: `gemini-3.5-flash-lite`).
+- **Database Backend**:
+  - For local development: `DATABASE_PATH=ziox.db` (default SQLite).
+  - For cloud/production: `TURSO_DATABASE_URL` (e.g. `libsql://ziox-...turso.io`) and `TURSO_AUTH_TOKEN`.
+- **Twitter / X Scout Provider**:
+  - `TWITTER_PROVIDER`: `mock` (offline testing), `twikit` (session cookies), or `zernio`.
+  - For Twikit: `X_AUTH_TOKEN` and `X_CT0` cookies from a dedicated scout account.
+- **Telegram Bot Dispatcher**:
+  - `TELEGRAM_BOT_TOKEN`: Telegram bot token from `@BotFather`.
+  - `TELEGRAM_CHAT_ID`: Admin Telegram chat ID for operational alerts.
+  - `TELEGRAM_REVIEW_ENABLED`: Set to `true` to enable community review cards.
+- **Operational Mode**:
+  - `DRY_RUN`: Set to `true` to prevent any unintended live publishing to X.
 
-#### A. Discovery Radar (Finding & Queuing Tweets)
-- Scan keywords and populate the SQLite queue:
+---
+
+## CLI Reference & Operational Commands
+
+### A. System Diagnostics & Status
+- Display current database target (Turso / SQLite), available subscriber demand by language, quotas, and recent logs:
   ```powershell
-  python main.py --radar
+  python main.py --status
+  ```
+- Run automated unit and integration tests:
+  ```powershell
+  pytest -v
+  ```
+
+### B. Autonomous Pipeline
+- Execute the end-to-end demand-driven pipeline (Radar -> Multi-Variation Grounding -> Sharded Dispatch):
+  ```powershell
+  # Safe dry-run mode (review cards generated without publishing to X)
+  python main.py --pipeline
+
+  # Live execution with specific virality threshold
+  python main.py --pipeline --live --threshold 5.0
+
+  # Immediate execution without random start jitter
+  python main.py --pipeline --live --no-jitter
+  ```
+
+### C. Discovery Radar & Queue Management
+- Scan keywords and populate the queue with candidate posts:
+  ```powershell
+  python main.py --radar --min-faves 5
   ```
 - Manually queue a specific tweet URL or numeric ID:
   ```powershell
   python main.py --queue-tweet "https://x.com/user/status/1845123456789" --text "Claim text" --author "user" --likes 1200 --retweets 450
   ```
-- Inspect currently queued candidate tweets:
+- Inspect currently queued candidate tweets awaiting processing:
   ```powershell
   python main.py --queue-list
   ```
-
-#### B. Fact-Checking & Targeted Action (Responder)
-- Process pending tweets in the queue with interactive Human-in-the-Loop review:
+- Process pending tweets with interactive Human-in-the-Loop terminal review:
   ```powershell
   python main.py --process-queue -i
   ```
-- Target and process a specific tweet URL or ID end-to-end:
+- Target and evaluate a single tweet end-to-end:
   ```powershell
   python main.py --process-tweet "1845123456789" -i
   ```
 
-#### C. Diagnostics & Testing
-- Display operational status, quotas, and database logs:
+### D. Telegram Webhook & Polling Daemon
+- **Register Serverless Cloudflare Webhook**:
   ```powershell
-  python main.py --status
+  python main.py --set-webhook "https://ziox-telegram-webhook.<subdomain>.workers.dev" --webhook-secret "your_secret_token"
   ```
-- Run unit test suite:
+- **Delete Webhook** (to resume local polling):
   ```powershell
-  pytest -v
+  python main.py --delete-webhook
   ```
-
+- **Run Local Polling Daemon** (for local development or environments without public webhooks):
+  ```powershell
+  python main.py --poll-telegram --poll-interval 2.0
+  ```
+- **Single-shot Telegram Sync**:
+  ```powershell
+  python main.py --sync-telegram
+  ```
 
 ---
 
-## Community Telegram Mode
+## Community SaaS Telegram Mode
 
-zioX can serve a community of subscribers. A single dedicated **scout X account** scans for viral posts; each subscriber receives a unique, fact-checked reply draft in Telegram with a one-tap **X Web Intent** button and publishes it from their own account. The bot never posts to X on its own while `TELEGRAM_REVIEW_ENABLED=true`.
+zioX scales community engagement by empowering subscribers to publish fact-checked counter-arguments from their own accounts with a single tap.
 
-**Pipeline:** Discovery Radar (Boolean OR queries, `min_faves` filter, Gaussian jitter, circuit breaker) -> Gemini grounding (batch reply variations) -> Humanizer (link / no-link mix) -> sharded dispatch to eligible subscribers.
+### Subscriber Lifecycle
 
-**Subscriber commands:** `/start`, `/ready`, `/stop`, `/style`, `/lang <en|ar|both>`, `/limit <n>`, `/quota`. New subscribers must confirm readiness, and are auto-paused after `MAX_UNCONFIRMED_DISPATCHES` cards in a row without pressing the "I replied" button.
+```
+[User sends /start]
+         │
+         ▼
+[Pending State (ready_confirmed=0)]
+         │
+         ├───────────────────────────────────────────┐
+         ▼                                           ▼
+[Sends /ready or clicks Inline Button]    [Sets preferences: /lang, /style, /limit]
+         │                                           │
+         ▼                                           │
+  [Active Subscriber] ◄──────────────────────────────┘
+         │
+         ▼
+[Receives Sharded Review Card in Telegram]
+         │
+         ├─── Tap "X Web Intent" ──► Opens X with pre-filled rebuttal
+         └─── Tap "I Replied"    ──► Confirms dispatch (ack:<tweet_id>)
+```
 
-### Running Live with Turso (Cloud Database)
+- **Interactive Commands**: `/start`, `/help`, `/ready`, `/stop`, `/style`, `/lang`, `/limit`, `/quota`.
+  - All command replies provide intuitive multiple-choice inline keyboards (`InlineKeyboardMarkup`).
+- **Readiness Gate**: New subscribers must explicitly confirm readiness (`/ready` or button) before receiving review cards.
+- **Auto-Pause Shield**: To preserve quota and avoid cluttering inactive users, subscribers are auto-paused (`active=0`) if they accumulate `MAX_UNCONFIRMED_DISPATCHES` (default: 5) without pressing "I Replied".
+- **Language Preferences**: Supports English (`en` - default), Arabic (`ar`), and bilingual (`both`).
 
-1. Create the database:
-   ```bash
-   turso db create ziox
-   turso db show ziox --url        # TURSO_DATABASE_URL
-   turso db tokens create ziox     # TURSO_AUTH_TOKEN
-   ```
-2. Fill `.env` (see `.env.example`): `TURSO_*`, `TWITTER_PROVIDER=twikit`, `X_AUTH_TOKEN`, `X_CT0` (scout account), `GEMINI_API_KEY`, `TELEGRAM_*`, `TELEGRAM_REVIEW_ENABLED=true`, `DRY_RUN=false`. When `TURSO_DATABASE_URL` is set, Turso is used instead of the local SQLite file; schema and migrations are applied automatically.
-3. Verify and run:
-   ```powershell
-   .\.venv\Scripts\python.exe main.py --status                    # confirms active DB
-   .\.venv\Scripts\python.exe main.py --radar --min-faves 20      # scan only
-   .\.venv\Scripts\python.exe main.py --pipeline --live           # full pipeline once
-   .\.venv\Scripts\python.exe main.py --poll-telegram --poll-interval 10   # real-time commands daemon
-   ```
+---
 
-### Scheduled Runs on GitHub Actions
+## Cloud Deployments
 
-`.github/workflows/ziox_cron.yml` runs `main.py --pipeline --live` every 4 hours. Add these repository secrets: `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `GEMINI_API_KEY`, `X_AUTH_TOKEN`, `X_CT0`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and `TWITTER_PROVIDER=twikit` (the workflow defaults to `mock`, which scans nothing).
+### 1. Cloudflare Worker Telegram Webhook (Zero-Cost 24/7)
 
-> Actions only runs during the cron window, so Telegram commands are processed once per run. For real-time responses run `--poll-telegram` on a persistent host.
+The Cloudflare Worker handles all Telegram commands and button callbacks 24/7 with zero cold start latency:
 
-### Scanner Safety Notes
+```bash
+cd workers/telegram_webhook
 
-- Use a **dedicated scout X account**. `twikit` is unofficial session automation and may be restricted by X.
-- Jitter (`START_JITTER_MAX_MINUTES`, `MIN/MAX_SEARCH_DELAY_SECONDS`) hides robotic timing but is a secondary defense. The primary defenses are the scout account, few requests (Boolean OR consolidation), and the circuit breaker, which quarantines the scanner for `SCANNER_COOLDOWN_MINUTES` after a 401/403/429.
-- GitHub Actions runs from datacenter IPs. On a private repo, long start jitter consumes billable minutes.
+# Configure secrets in Cloudflare
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put TURSO_DATABASE_URL
+npx wrangler secret put TURSO_AUTH_TOKEN
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
+npx wrangler secret put TELEGRAM_CHAT_ID
 
-## Documentation Map
+# Deploy worker
+npx wrangler deploy
 
-- `openspec/specs/`: source-of-truth capability specifications.
-- `openspec/changes/archive/`: completed change proposals, designs, and tasks.
-- `.serena/memories/`: condensed architecture notes for AI agents.
+# Register webhook with Telegram
+python ../../main.py --set-webhook "https://ziox-telegram-webhook.<your-subdomain>.workers.dev" --webhook-secret "your_secret"
+```
+
+### 2. Live Turso Cloud Database
+
+Turso provides distributed libSQL storage accessible via both native Python HTTP calls and Cloudflare Workers:
+```bash
+turso db create ziox
+turso db show ziox --url        # Set as TURSO_DATABASE_URL
+turso db tokens create ziox     # Set as TURSO_AUTH_TOKEN
+```
+When `TURSO_DATABASE_URL` is set in `.env`, zioX automatically uses Turso and applies schema definitions and incremental migrations.
+
+### 3. Scheduled Autonomous Runs via GitHub Actions
+
+`.github/workflows/ziox_cron.yml` executes `main.py --pipeline --live` every 4 hours.
+
+Configure the following GitHub repository secrets:
+- `TURSO_DATABASE_URL` & `TURSO_AUTH_TOKEN`
+- `GEMINI_API_KEY`
+- `X_AUTH_TOKEN` & `X_CT0` (scout account)
+- `TELEGRAM_BOT_TOKEN` & `TELEGRAM_CHAT_ID`
+- `TWITTER_PROVIDER=twikit`
+
+> [!NOTE]
+> When the Cloudflare Worker Webhook is registered, GitHub Actions only needs to run the batch scan and distribution pipeline (`--pipeline`), consuming fewer than 60 total GitHub Actions minutes per month.
+
+---
+
+## Scanner Safety & Ban Mitigation
+
+- **Dedicated Scout Account**: Always use a dedicated scout account for Twikit session automation. Community subscribers never expose their credentials.
+- **Request Minimization**: Keywords are merged into consolidated Boolean `OR` queries per script (e.g. 2–4 queries per cycle instead of dozens).
+- **Adaptive Jitter**: Random Gaussian delays between search queries (`MIN/MAX_SEARCH_DELAY_SECONDS`) and pipeline execution (`START_JITTER_MAX_MINUTES`) emulate natural human patterns.
+- **Automated Circuit Breaker**: If X returns HTTP 401, 403, or 429, the system halts immediately, quarantines the scout account for `SCANNER_COOLDOWN_MINUTES` (12h), and sends an administrative alert to `TELEGRAM_CHAT_ID`.
+
+---
+
+## Documentation & OpenSpec
+
+- `openspec/specs/`: Canonical source-of-truth capability specifications (`discovery-radar`, `virality-scoring`, `cloudflare-telegram-webhook`, `pipeline-scheduler`, `storage-turso`, `telegram-dispatcher`).
+- `openspec/changes/archive/`: Historical records of completed changes, proposals, designs, and tasks.
+- `.serena/memories/`: Condensed architecture notes and commands for AI agents.
