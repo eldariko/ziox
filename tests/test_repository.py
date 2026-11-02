@@ -271,3 +271,35 @@ def test_scale_1000_single_query_cohort_eligibility_and_readiness(tmp_path):
     pending = repo.get_pending_tweets(limit=5, include_waves=True)
     # Fresh DISCOVERED tweet comes before DISPATCHED_WAVE even if DISPATCHED_WAVE has higher virality
     assert [p["tweet_id"] for p in pending] == ["fresh_tweet_2", "wave_tweet_1"]
+
+
+def test_get_available_subscriber_demand(tmp_path):
+    """Verify Task 2.1: get_available_subscriber_demand counts active, ready subscribers under daily quota by language."""
+    db_file = str(tmp_path / "test_demand.db")
+    repo = Repository(db_file)
+
+    # 300 English, 100 Arabic, 50 Both, 20 Pending (ready_confirmed=0), 10 Inactive (active=0)
+    for i in range(300):
+        repo.upsert_subscriber(chat_id=f"en_{i}", preferred_lang="en", ready_confirmed=True, daily_limit=2)
+    for i in range(100):
+        repo.upsert_subscriber(chat_id=f"ar_{i}", preferred_lang="ar", ready_confirmed=True, daily_limit=2)
+    for i in range(50):
+        repo.upsert_subscriber(chat_id=f"both_{i}", preferred_lang="both", ready_confirmed=True, daily_limit=1)
+    for i in range(20):
+        repo.upsert_subscriber(chat_id=f"pend_{i}", preferred_lang="en", ready_confirmed=False, daily_limit=3)
+    for i in range(10):
+        repo.upsert_subscriber(chat_id=f"inact_{i}", preferred_lang="en", ready_confirmed=True, active=False, daily_limit=3)
+
+    demand = repo.get_available_subscriber_demand(max_unconfirmed=5)
+    assert demand["en"] == 350   # 300 en + 50 both
+    assert demand["ar"] == 150   # 100 ar + 50 both
+    assert demand["total"] == 450  # 300 + 100 + 50 distinct available subscribers
+
+    # Exhaust daily quota for the 50 'both' subscribers (daily_limit=1)
+    for i in range(50):
+        repo.record_dispatch("tweet_quota_test", f"both_{i}", f"hash_{i}")
+
+    demand_after = repo.get_available_subscriber_demand(max_unconfirmed=5)
+    assert demand_after["en"] == 300
+    assert demand_after["ar"] == 100
+    assert demand_after["total"] == 400

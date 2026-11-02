@@ -12,7 +12,7 @@ from database.turso_client import TursoClient
 logger = logging.getLogger(__name__)
 
 SUBSCRIBER_MIGRATIONS = [
-    ("preferred_lang", "ALTER TABLE subscribers ADD COLUMN preferred_lang TEXT DEFAULT 'both'"),
+    ("preferred_lang", "ALTER TABLE subscribers ADD COLUMN preferred_lang TEXT DEFAULT 'en'"),
     ("ready_confirmed", "ALTER TABLE subscribers ADD COLUMN ready_confirmed BOOLEAN DEFAULT 1"),
     ("consecutive_unconfirmed", "ALTER TABLE subscribers ADD COLUMN consecutive_unconfirmed INTEGER DEFAULT 0"),
     ("total_confirmed_replies", "ALTER TABLE subscribers ADD COLUMN total_confirmed_replies INTEGER DEFAULT 0"),
@@ -516,7 +516,7 @@ class Repository:
         tier: str = "free",
         daily_limit: int = 3,
         preferred_style: str = "any",
-        preferred_lang: str = "both",
+        preferred_lang: str = "en",
         ready_confirmed: bool = True,
         active: bool = True,
     ) -> None:
@@ -524,9 +524,9 @@ class Repository:
         clean_id = str(chat_id).strip()
         active_int = 1 if active else 0
         ready_int = 1 if ready_confirmed else 0
-        clean_lang = (preferred_lang or "both").strip().lower()
+        clean_lang = (preferred_lang or "en").strip().lower()
         if clean_lang not in ("en", "ar", "both"):
-            clean_lang = "both"
+            clean_lang = "en"
 
         query = """
             INSERT INTO subscribers (
@@ -601,7 +601,7 @@ class Repository:
         clean_id = str(chat_id).strip()
         clean_lang = preferred_lang.strip().lower()
         if clean_lang not in ("en", "ar", "both"):
-            clean_lang = "both"
+            clean_lang = "en"
         query = """
             UPDATE subscribers
             SET preferred_lang = ?, updated_at = CURRENT_TIMESTAMP
@@ -781,6 +781,49 @@ class Repository:
                 cursor.execute(query)
                 return [dict(row) for row in cursor.fetchall()]
 
+    def get_available_subscriber_demand(self, max_unconfirmed: int = 5) -> Dict[str, int]:
+        """
+        Single SQL query returning the count of currently available, ready subscribers
+        who have remaining daily quota (`today_count < daily_limit`), broken down by language:
+        `{"en": en_count, "ar": ar_count, "total": total_count}`.
+        Subscribers with `preferred_lang = 'both'` are counted in both `en` and `ar`,
+        while `total` is the distinct count of available subscribers.
+        """
+        query = """
+            SELECT
+                COALESCE(SUM(CASE WHEN COALESCE(s.preferred_lang, 'en') IN ('en', 'both') THEN 1 ELSE 0 END), 0) AS en_count,
+                COALESCE(SUM(CASE WHEN COALESCE(s.preferred_lang, 'en') IN ('ar', 'both') THEN 1 ELSE 0 END), 0) AS ar_count,
+                COUNT(*) AS total_count
+            FROM subscribers s
+            LEFT JOIN (
+                SELECT chat_id, COUNT(*) AS cnt
+                FROM dispatches
+                WHERE date(dispatched_at) = date('now')
+                GROUP BY chat_id
+            ) today_counts ON today_counts.chat_id = s.chat_id
+            WHERE s.active = 1
+              AND COALESCE(s.ready_confirmed, 1) = 1
+              AND (s.tier = 'admin' OR COALESCE(s.consecutive_unconfirmed, 0) < ?)
+              AND COALESCE(today_counts.cnt, 0) < s.daily_limit
+        """
+        params = [int(max_unconfirmed)]
+        if self.is_remote:
+            res = self._remote_client.execute(query, params)
+            row = res.rows[0] if res.rows else None
+        else:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                row = cursor.fetchone()
+
+        if not row:
+            return {"en": 0, "ar": 0, "total": 0}
+        return {
+            "en": int(row["en_count"] or 0),
+            "ar": int(row["ar_count"] or 0),
+            "total": int(row["total_count"] or 0),
+        }
+
     def get_eligible_subscribers_for_tweet(
         self,
         tweet_id: str,
@@ -818,7 +861,7 @@ class Repository:
             WHERE s.active = 1
               AND COALESCE(s.ready_confirmed, 1) = 1
               AND (s.tier = 'admin' OR COALESCE(s.consecutive_unconfirmed, 0) < ?)
-              AND (COALESCE(s.preferred_lang, 'both') = 'both' OR s.preferred_lang = ?)
+              AND (s.preferred_lang = 'both' OR COALESCE(s.preferred_lang, 'en') = ?)
               AND COALESCE(today_counts.cnt, 0) < s.daily_limit
               AND NOT EXISTS (
                   SELECT 1 FROM dispatches d

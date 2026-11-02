@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
     tier TEXT DEFAULT 'free', -- 'free', 'pro', 'admin'
     daily_limit INTEGER DEFAULT 3,
     preferred_style TEXT DEFAULT 'any', -- 'any', 'factual', 'sharp', 'historical_legal', 'rhetorical_question'
-    preferred_lang TEXT DEFAULT 'both', -- 'en', 'ar', 'both'
+    preferred_lang TEXT DEFAULT 'en', -- 'en', 'ar', 'both'
     ready_confirmed BOOLEAN DEFAULT 1,
     consecutive_unconfirmed INTEGER DEFAULT 0,
     total_confirmed_replies INTEGER DEFAULT 0,
