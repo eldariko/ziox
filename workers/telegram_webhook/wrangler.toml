@@ -1,0 +1,13 @@
+name = "ziox-telegram-webhook"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+MAX_USER_DAILY_LIMIT = "5"
+
+# Secrets to configure via Cloudflare Dashboard or Wrangler CLI:
+#   npx wrangler secret put TELEGRAM_BOT_TOKEN
+#   npx wrangler secret put TURSO_DATABASE_URL
+#   npx wrangler secret put TURSO_AUTH_TOKEN
+#   npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
+#   npx wrangler secret put TELEGRAM_CHAT_ID
