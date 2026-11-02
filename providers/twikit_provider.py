@@ -236,14 +236,19 @@ class TwikitTwitterProvider(BaseTwitterProvider):
             raise
 
     def search_recent_tweets(self, query: str, limit: int = 10) -> List[Tweet]:
-        """Search top recent tweets matching query on X."""
+        """Search both Top and Latest tweets matching query on X and deduplicate by tweet ID."""
         try:
-            # Query "Latest" first to find fresh tweets from the current day/hours rather than stale historical posts
-            results = _run_coro(self.client.search_tweet(query, product="Latest", count=limit))
-            if not results:
-                results = _run_coro(self.client.search_tweet(query, product="Top", count=limit))
+            top_results = _run_coro(self.client.search_tweet(query, product="Top", count=limit)) or []
+            latest_results = _run_coro(self.client.search_tweet(query, product="Latest", count=limit)) or []
+
+            seen_ids = set()
             tweets: List[Tweet] = []
-            for raw_tweet in results:
+            for raw_tweet in list(top_results) + list(latest_results):
+                tid = str(getattr(raw_tweet, "id", ""))
+                if not tid or tid in seen_ids:
+                    continue
+                seen_ids.add(tid)
+
                 author = "unknown"
                 if hasattr(raw_tweet, "user") and raw_tweet.user:
                     author = getattr(raw_tweet.user, "screen_name", "unknown")
@@ -255,14 +260,14 @@ class TwikitTwitterProvider(BaseTwitterProvider):
                 text = getattr(raw_tweet, "text", "") or getattr(raw_tweet, "full_text", "")
                 tweets.append(
                     Tweet(
-                        id=str(raw_tweet.id),
+                        id=tid,
                         text=text,
                         author_handle=author,
                         created_at=created_dt,
                         likes=getattr(raw_tweet, "favorite_count", 0) or 0,
                         retweets=getattr(raw_tweet, "retweet_count", 0) or 0,
                         replies=getattr(raw_tweet, "reply_count", 0) or 0,
-                        conversation_id=str(getattr(raw_tweet, "conversation_id", raw_tweet.id)),
+                        conversation_id=str(getattr(raw_tweet, "conversation_id", tid)),
                         in_reply_to_tweet_id=str(getattr(raw_tweet, "in_reply_to", "")) or None
                     )
                 )
