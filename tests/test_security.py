@@ -3,9 +3,9 @@ from engine.security import mask_telegram_token, SensitiveDataRedactor, setup_se
 
 
 def test_mask_telegram_token_in_urls_and_strings():
-    sample_url = "https://api.telegram.org/bot8847914934:AAEfRWayAqqQk1CUtoj9IJb7-qMqXbtwA9Q/getUpdates?timeout=0"
+    sample_url = "https://api.telegram.org/bot123456789:AAFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE12/getUpdates?timeout=0"
     masked = mask_telegram_token(sample_url)
-    assert "8847914934:AAEfRWayAqqQk1CUtoj9IJb7-qMqXbtwA9Q" not in masked
+    assert "123456789:AAFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE12" not in masked
     assert "https://api.telegram.org/bot[REDACTED]/getUpdates?timeout=0" == masked
 
 
@@ -18,7 +18,7 @@ def test_mask_telegram_token_with_none_and_other_types():
 
 def test_sensitive_data_redactor_filter():
     redactor = SensitiveDataRedactor()
-    
+
     # Test record with bot token in msg
     record = logging.LogRecord(
         name="httpx",
