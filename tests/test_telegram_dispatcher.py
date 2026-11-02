@@ -540,3 +540,229 @@ def test_scale_1000_readiness_gate_commands_callbacks_and_403_deactivation(tmp_p
     # 5001 received the card; 5002 was skipped (ready_confirmed=0); blocked_user returned 403 and was deactivated!
     assert sent_cnt == 1
     assert repo.get_subscriber("blocked_user")["active"] == 0
+
+
+def test_default_language_is_english_only(tmp_path):
+    """Verify that new subscribers registered via /start default strictly to 'en'."""
+    db_file = str(tmp_path / "test_lang_default.db")
+    repo = Repository(db_file)
+    dispatcher = TelegramDispatcher(bot_token="test_token", chat_ids="")
+
+    sent_messages = []
+
+    def mock_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if "getUpdates" in url_str:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": [
+                        {
+                            "update_id": 1,
+                            "message": {"chat": {"id": 8888, "username": "new_user"}, "text": "/start"},
+                        }
+                    ],
+                },
+            )
+        elif "sendMessage" in url_str:
+            sent_messages.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+        return httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(mock_handler)) as client:
+        dispatcher.sync_subscribers(repository=repo, http_client=client)
+
+    sub = repo.get_subscriber("8888")
+    assert sub is not None
+    assert sub["preferred_lang"] == "en"
+    # Check welcome message contains English default notification and keyboard
+    assert len(sent_messages) == 1
+    assert "en" in sent_messages[0]["text"]
+    assert "reply_markup" in sent_messages[0]
+    assert "inline_keyboard" in sent_messages[0]["reply_markup"]
+
+
+def test_commands_show_multiple_choice_inline_keyboards(tmp_path):
+    """Verify that /style, /lang, /limit, /help commands present multiple-choice inline keyboards."""
+    db_file = str(tmp_path / "test_commands_keyboards.db")
+    repo = Repository(db_file)
+    dispatcher = TelegramDispatcher(bot_token="test_token", chat_ids="")
+
+    sent_messages = []
+
+    def mock_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if "getUpdates" in url_str:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": [
+                        {"update_id": 10, "message": {"chat": {"id": 7777}, "text": "/style"}},
+                        {"update_id": 11, "message": {"chat": {"id": 7777}, "text": "/lang"}},
+                        {"update_id": 12, "message": {"chat": {"id": 7777}, "text": "/limit"}},
+                        {"update_id": 13, "message": {"chat": {"id": 7777}, "text": "/help"}},
+                    ],
+                },
+            )
+        elif "sendMessage" in url_str:
+            sent_messages.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+        return httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(mock_handler)) as client:
+        dispatcher.sync_subscribers(repository=repo, http_client=client)
+
+    assert len(sent_messages) == 4
+    # /style message has style choices (factual, sharp, etc.)
+    style_kb = sent_messages[0]["reply_markup"]["inline_keyboard"]
+    style_callbacks = [btn["callback_data"] for row in style_kb for btn in row]
+    assert "set_style:factual" in style_callbacks
+    assert "set_style:sharp" in style_callbacks
+
+    # /lang message has language choices (en, ar, both)
+    lang_kb = sent_messages[1]["reply_markup"]["inline_keyboard"]
+    lang_callbacks = [btn["callback_data"] for row in lang_kb for btn in row]
+    assert "set_lang:en" in lang_callbacks
+    assert "set_lang:ar" in lang_callbacks
+    assert "set_lang:both" in lang_callbacks
+
+    # /limit message has daily limit choices
+    limit_kb = sent_messages[2]["reply_markup"]["inline_keyboard"]
+    limit_callbacks = [btn["callback_data"] for row in limit_kb for btn in row]
+    assert "set_limit:1" in limit_callbacks
+    assert "set_limit:3" in limit_callbacks
+
+    # /help message has command navigation menu
+    help_kb = sent_messages[3]["reply_markup"]["inline_keyboard"]
+    help_callbacks = [btn["callback_data"] for row in help_kb for btn in row]
+    assert "menu:style" in help_callbacks
+    assert "menu:lang" in help_callbacks
+
+
+def test_callback_query_selection_updates_subscriber_preferences(tmp_path):
+    """Verify that inline button clicks (callback queries) update preferences and acknowledge Telegram."""
+    db_file = str(tmp_path / "test_cb_prefs.db")
+    repo = Repository(db_file)
+    repo.upsert_subscriber(chat_id="6666", username="test_cb", preferred_lang="en", active=True)
+    dispatcher = TelegramDispatcher(bot_token="test_token", chat_ids="")
+
+    answered_callbacks = []
+    sent_messages = []
+
+    def mock_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if "getUpdates" in url_str:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": [
+                        {"update_id": 50, "callback_query": {"id": "cb_style", "data": "set_style:sharp", "message": {"chat": {"id": 6666}}}},
+                        {"update_id": 51, "callback_query": {"id": "cb_lang", "data": "set_lang:ar", "message": {"chat": {"id": 6666}}}},
+                        {"update_id": 52, "callback_query": {"id": "cb_limit", "data": "set_limit:5", "message": {"chat": {"id": 6666}}}},
+                    ],
+                },
+            )
+        elif "answerCallbackQuery" in url_str:
+            answered_callbacks.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True})
+        elif "sendMessage" in url_str:
+            sent_messages.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+        return httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(mock_handler)) as client:
+        summary = dispatcher.sync_subscribers(repository=repo, http_client=client)
+
+    assert summary["style_updated"] == 1
+    assert summary["lang_updated"] == 1
+    assert summary["limit_updated"] == 1
+    assert len(answered_callbacks) == 3
+    sub = repo.get_subscriber("6666")
+    assert sub["preferred_style"] == "sharp"
+    assert sub["preferred_lang"] == "ar"
+    assert sub["daily_limit"] == 5
+
+
+def test_setup_bot_commands_registers_all_commands():
+    """Verify setup_bot_commands sends all commands to Telegram API setMyCommands."""
+    dispatcher = TelegramDispatcher(bot_token="fake_bot_token")
+    recorded_payload = []
+
+    def mock_handler(request: httpx.Request):
+        if "setMyCommands" in str(request.url):
+            recorded_payload.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True, "result": True})
+        return httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(mock_handler)) as client:
+        ok = dispatcher.setup_bot_commands(http_client=client)
+
+    assert ok is True
+    assert len(recorded_payload) == 1
+    commands = [c["command"] for c in recorded_payload[0]["commands"]]
+    assert "start" in commands
+    assert "help" in commands
+    assert "style" in commands
+    assert "lang" in commands
+    assert "limit" in commands
+    assert "quota" in commands
+    assert "stop" in commands
+
+
+def test_set_and_delete_webhook_and_409_conflict_handling(tmp_path):
+    """
+    Verify Task 3.2:
+    1. set_webhook registers the Cloudflare Worker URL and optional secret_token via Telegram setWebhook API.
+    2. delete_webhook removes the webhook via Telegram deleteWebhook API.
+    3. sync_subscribers handles HTTP 409 Conflict gracefully when a webhook is active.
+    """
+    db_file = str(tmp_path / "test_webhook_409.db")
+    repo = Repository(db_file)
+    dispatcher = TelegramDispatcher(bot_token="webhook_bot_token", chat_ids="99999")
+
+    webhook_calls = []
+
+    def mock_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if "setMyCommands" in url_str:
+            return httpx.Response(200, json={"ok": True, "result": True})
+        if "setWebhook" in url_str:
+            webhook_calls.append(("setWebhook", json.loads(request.content)))
+            return httpx.Response(200, json={"ok": True, "result": True})
+        if "deleteWebhook" in url_str:
+            webhook_calls.append(("deleteWebhook", json.loads(request.content)))
+            return httpx.Response(200, json={"ok": True, "result": True})
+        if "getUpdates" in url_str:
+            return httpx.Response(
+                409,
+                json={
+                    "ok": False,
+                    "error_code": 409,
+                    "description": "Conflict: can't use getUpdates method while webhook is active",
+                },
+            )
+        return httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(mock_handler)) as client:
+        ok_set = dispatcher.set_webhook(
+            webhook_url="https://ziox-telegram-webhook.example.workers.dev",
+            secret_token="my_secret_123",
+            http_client=client,
+        )
+        assert ok_set is True
+
+        # Calling sync_subscribers when webhook is active (HTTP 409) should seed admin and return cleanly
+        summary = dispatcher.sync_subscribers(repository=repo, http_client=client)
+        assert summary["started"] == 0
+        assert "99999" in repo.get_admin_chat_ids()
+
+        ok_del = dispatcher.delete_webhook(http_client=client)
+        assert ok_del is True
+
+    assert webhook_calls[0][0] == "setWebhook"
+    assert webhook_calls[0][1]["url"] == "https://ziox-telegram-webhook.example.workers.dev"
+    assert webhook_calls[0][1]["secret_token"] == "my_secret_123"
+    assert webhook_calls[1][0] == "deleteWebhook"

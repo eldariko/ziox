@@ -1,8 +1,9 @@
 """
 Telegram Review & Web Intent Dispatcher.
 Dispatches grounded reply drafts with native one-tap X Web Intent buttons,
-serverless subscriber onboarding via paginated getUpdates, readiness & action confirmation,
-language/quota commands, per-subscriber variation sharding, and admin-only technical alerts.
+serverless subscriber onboarding via paginated getUpdates or Cloudflare Worker Webhook,
+readiness & action confirmation, language/quota commands, per-subscriber variation sharding,
+and admin-only technical alerts.
 """
 
 import html
@@ -10,6 +11,7 @@ import logging
 import urllib.parse
 from typing import List, Optional, Dict, Any
 import httpx
+from engine.security import mask_telegram_token
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +29,84 @@ def build_x_web_intent_url(tweet_id: str, reply_text: str) -> str:
     return f"https://x.com/intent/tweet?in_reply_to={tweet_id}&text={encoded_text}"
 
 
+def get_style_keyboard() -> Dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🎯 Factual (עובדתי)", "callback_data": "set_style:factual"},
+                {"text": "⚡ Sharp (עוקצני/חד)", "callback_data": "set_style:sharp"},
+            ],
+            [
+                {"text": "📜 Historical/Legal (משפטי)", "callback_data": "set_style:historical_legal"},
+                {"text": "❓ Rhetorical (רטורי)", "callback_data": "set_style:rhetorical_question"},
+            ],
+            [
+                {"text": "🎲 Any (ללא העדפה)", "callback_data": "set_style:any"},
+            ],
+            [
+                {"text": "🔙 תפריט ראשי", "callback_data": "menu:main"},
+            ],
+        ]
+    }
+
+
+def get_lang_keyboard() -> Dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🇬🇧 English (אנגלית - ברירת מחדל)", "callback_data": "set_lang:en"},
+            ],
+            [
+                {"text": "🇸🇦 Arabic (ערבית בלבד)", "callback_data": "set_lang:ar"},
+            ],
+            [
+                {"text": "🌐 Both (שתי השפות)", "callback_data": "set_lang:both"},
+            ],
+            [
+                {"text": "🔙 תפריט ראשי", "callback_data": "menu:main"},
+            ],
+        ]
+    }
+
+
+def get_limit_keyboard(max_user_daily_limit: int = 5) -> Dict[str, Any]:
+    row = [
+        {"text": f"{i} ביום", "callback_data": f"set_limit:{i}"}
+        for i in range(1, max_user_daily_limit + 1)
+    ]
+    return {
+        "inline_keyboard": [
+            row,
+            [{"text": "🔙 תפריט ראשי", "callback_data": "menu:main"}],
+        ]
+    }
+
+
+def get_main_menu_keyboard() -> Dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ אני מוכן להגיב", "callback_data": "ready:confirm"}],
+            [
+                {"text": "🎨 סגנון תגובה (/style)", "callback_data": "menu:style"},
+                {"text": "🌐 שפת פוסטים (/lang)", "callback_data": "menu:lang"},
+            ],
+            [
+                {"text": "📊 מכסה יומית (/limit)", "callback_data": "menu:limit"},
+                {"text": "📈 סטטוס ומכסה (/quota)", "callback_data": "menu:quota"},
+            ],
+            [
+                {"text": "🛑 השהיית מנוי (/stop)", "callback_data": "menu:stop"},
+            ],
+        ]
+    }
+
+
 class TelegramDispatcher:
     """
     Lightweight dispatcher to send fact-checked draft cards to Telegram
     with one-tap X Web Intent approval buttons, manage serverless community
     subscribers (/start, /ready, /stop, /style, /lang, /limit, /quota + callback queries),
-    and dispatch admin-only health alerts.
+    register/remove Cloudflare Worker webhooks, and dispatch admin-only health alerts.
     """
 
     def __init__(self, bot_token: Optional[str] = None, chat_ids: Optional[str] = None):
@@ -55,6 +129,123 @@ class TelegramDispatcher:
             if self.bot_token
             else None
         )
+        self.set_commands_url = (
+            f"https://api.telegram.org/bot{self.bot_token}/setMyCommands"
+            if self.bot_token
+            else None
+        )
+        self.set_webhook_url = (
+            f"https://api.telegram.org/bot{self.bot_token}/setWebhook"
+            if self.bot_token
+            else None
+        )
+        self.delete_webhook_url = (
+            f"https://api.telegram.org/bot{self.bot_token}/deleteWebhook"
+            if self.bot_token
+            else None
+        )
+
+    def setup_bot_commands(self, http_client: Optional[httpx.Client] = None) -> bool:
+        """
+        Register bot commands in Telegram's UI via setMyCommands API.
+        Populates Telegram's native command autocomplete list and Menu button.
+        """
+        if not self.set_commands_url:
+            return False
+        commands = [
+            {"command": "start", "description": "הרשמה והפעלת המנוי ב-zioX"},
+            {"command": "help", "description": "מדריך פקודות ותפריט מהיר"},
+            {"command": "ready", "description": "אישור מוכנות לקבלת פוסטים להגבה"},
+            {"command": "style", "description": "בחירת סגנון תגובות מועדף"},
+            {"command": "lang", "description": "בחירת שפת פוסטים (ברירת מחדל: en)"},
+            {"command": "limit", "description": "עדכון מכסה יומית של פוסטים"},
+            {"command": "quota", "description": "בדיקת מצב המכסה וההגדרות שלך"},
+            {"command": "stop", "description": "השהיית קבלת פוסטים"},
+        ]
+        payload = {"commands": commands}
+
+        def _post(client: httpx.Client) -> bool:
+            try:
+                resp = client.post(self.set_commands_url, json=payload)
+                resp.raise_for_status()
+                logger.info("[TelegramDispatcher] Successfully registered bot commands in Telegram UI.")
+                return True
+            except Exception as e:
+                logger.debug(f"[TelegramDispatcher] Could not register bot commands: {mask_telegram_token(e)}")
+                return False
+
+        if http_client is not None:
+            return _post(http_client)
+        with httpx.Client(timeout=10.0) as client:
+            return _post(client)
+
+    def set_webhook(
+        self,
+        webhook_url: str,
+        secret_token: Optional[str] = None,
+        http_client: Optional[httpx.Client] = None,
+    ) -> bool:
+        """
+        Register an HTTPS Webhook URL (e.g., Cloudflare Worker) with Telegram's Bot API (`setWebhook`)
+        and register the bot's command menu (`setMyCommands`).
+        """
+        if not self.set_webhook_url or not webhook_url:
+            return False
+        payload: Dict[str, Any] = {
+            "url": webhook_url.strip(),
+            "allowed_updates": ["message", "edited_message", "callback_query"],
+        }
+        if secret_token:
+            payload["secret_token"] = secret_token.strip()
+
+        def _post(client: httpx.Client) -> bool:
+            try:
+                self.setup_bot_commands(http_client=client)
+                resp = client.post(self.set_webhook_url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                ok = bool(data.get("ok"))
+                if ok:
+                    logger.info(f"[TelegramDispatcher] Successfully registered Telegram Webhook: {webhook_url}")
+                return ok
+            except Exception as e:
+                logger.error(f"[TelegramDispatcher] Failed setting Telegram Webhook: {mask_telegram_token(e)}")
+                return False
+
+        if http_client is not None:
+            return _post(http_client)
+        with httpx.Client(timeout=10.0) as client:
+            return _post(client)
+
+    def delete_webhook(
+        self,
+        drop_pending_updates: bool = False,
+        http_client: Optional[httpx.Client] = None,
+    ) -> bool:
+        """
+        Remove the active Telegram Webhook (`deleteWebhook`) so `getUpdates` polling can be used again.
+        """
+        if not self.delete_webhook_url:
+            return False
+        payload = {"drop_pending_updates": bool(drop_pending_updates)}
+
+        def _post(client: httpx.Client) -> bool:
+            try:
+                resp = client.post(self.delete_webhook_url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                ok = bool(data.get("ok"))
+                if ok:
+                    logger.info("[TelegramDispatcher] Successfully deleted Telegram Webhook (getUpdates re-enabled).")
+                return ok
+            except Exception as e:
+                logger.error(f"[TelegramDispatcher] Failed deleting Telegram Webhook: {mask_telegram_token(e)}")
+                return False
+
+        if http_client is not None:
+            return _post(http_client)
+        with httpx.Client(timeout=10.0) as client:
+            return _post(client)
 
     @property
     def is_configured(self) -> bool:
@@ -104,7 +295,7 @@ class TelegramDispatcher:
                 resp.raise_for_status()
                 return True
             except Exception as e:
-                logger.error(f"[TelegramDispatcher] Failed sending message to {clean_chat_id}: {e}")
+                logger.error(f"[TelegramDispatcher] Failed sending message to {clean_chat_id}: {mask_telegram_token(e)}")
                 return False
 
         if http_client is not None:
@@ -131,7 +322,7 @@ class TelegramDispatcher:
                 resp.raise_for_status()
                 return True
             except Exception as e:
-                logger.debug(f"[TelegramDispatcher] answerCallbackQuery skipped/failed: {e}")
+                logger.debug(f"[TelegramDispatcher] answerCallbackQuery skipped/failed: {mask_telegram_token(e)}")
                 return False
 
         if http_client is not None:
@@ -153,6 +344,8 @@ class TelegramDispatcher:
            with `tier='admin'`, `ready_confirmed=True`, and `daily_limit=100`.
         2. Polls Telegram `getUpdates` in a paginated loop using `telegram_last_update_id` until
            all pending updates (100+ across large communities) are processed.
+           If a Cloudflare Worker Webhook is active (HTTP 409 Conflict), logs an info message and
+           returns cleanly without error.
         3. Processes commands (`/start`, `/ready`, `/stop`, `/style`, `/lang`, `/limit`, `/quota`)
            and inline button `callback_query` events (`ready:confirm` and `ack:<tweet_id>`).
         """
@@ -177,7 +370,7 @@ class TelegramDispatcher:
                         tier="admin",
                         daily_limit=100,
                         preferred_style="any",
-                        preferred_lang="both",
+                        preferred_lang="en",
                         ready_confirmed=True,
                         active=True,
                     )
@@ -205,10 +398,16 @@ class TelegramDispatcher:
 
                 try:
                     resp = client.get(self.updates_url, params=params)
+                    if resp.status_code == 409:
+                        logger.info(
+                            "[TelegramDispatcher] Telegram Webhook is active (HTTP 409 on getUpdates). "
+                            "Live updates are handled directly by the Cloudflare Worker Webhook."
+                        )
+                        break
                     resp.raise_for_status()
                     data = resp.json()
                 except Exception as e:
-                    logger.error(f"[TelegramDispatcher] Failed polling getUpdates: {e}")
+                    logger.error(f"[TelegramDispatcher] Failed polling getUpdates: {mask_telegram_token(e)}")
                     break
 
                 if not data.get("ok"):
@@ -234,7 +433,24 @@ class TelegramDispatcher:
                         cb_msg = cb.get("message") or {}
                         cb_chat = cb_msg.get("chat") or (cb.get("from") or {})
                         cb_chat_id = str(cb_chat.get("id", "")).strip()
+                        cb_username = (
+                            (cb.get("from") or {}).get("username")
+                            or cb_chat.get("username")
+                            or cb_chat.get("first_name")
+                            or ""
+                        )
                         if cb_chat_id:
+                            if hasattr(repository, "get_subscriber") and repository.get_subscriber(cb_chat_id) is None:
+                                repository.upsert_subscriber(
+                                    chat_id=cb_chat_id,
+                                    username=str(cb_username),
+                                    tier="admin" if cb_chat_id in self.chat_ids else "free",
+                                    daily_limit=100 if cb_chat_id in self.chat_ids else default_daily_limit,
+                                    preferred_style="any",
+                                    preferred_lang="en",
+                                    ready_confirmed=True if cb_chat_id in self.chat_ids else (not require_readiness_confirm),
+                                    active=True,
+                                )
                             if cb_data == "ready:confirm":
                                 if hasattr(repository, "confirm_subscriber_ready"):
                                     repository.confirm_subscriber_ready(cb_chat_id)
@@ -251,6 +467,169 @@ class TelegramDispatcher:
                                 self._send_direct_message(
                                     chat_id=cb_chat_id,
                                     text_html=ready_html,
+                                    http_client=client,
+                                    repository=repository,
+                                    reply_markup=get_main_menu_keyboard(),
+                                )
+                            elif cb_data.startswith("set_style:"):
+                                req_style = cb_data.split(":", 1)[1].strip().lower()
+                                if req_style in VALID_STYLES:
+                                    repository.update_subscriber_style(cb_chat_id, req_style)
+                                    summary["style_updated"] += 1
+                                    self._answer_callback_query(
+                                        cb_id,
+                                        text=f"✅ סגנון עודכן ל-{req_style}",
+                                        http_client=client,
+                                    )
+                                    style_html = (
+                                        f"🎨 <b>סגנון התגובות שלך עודכן ל-<code>{html.escape(req_style)}</code>!</b>\n"
+                                        "בסבבים הבאים נתעדף עבורך וריאציות בסגנון זה.\n"
+                                        "תוכל לשנות סגנון בכל עת:"
+                                    )
+                                    self._send_direct_message(
+                                        chat_id=cb_chat_id,
+                                        text_html=style_html,
+                                        reply_markup=get_style_keyboard(),
+                                        http_client=client,
+                                        repository=repository,
+                                    )
+                            elif cb_data.startswith("set_lang:"):
+                                req_lang = cb_data.split(":", 1)[1].strip().lower()
+                                if req_lang in VALID_LANGS:
+                                    if hasattr(repository, "update_subscriber_language"):
+                                        repository.update_subscriber_language(cb_chat_id, req_lang)
+                                    summary["lang_updated"] += 1
+                                    self._answer_callback_query(
+                                        cb_id,
+                                        text=f"✅ שפה עודכנה ל-{req_lang}",
+                                        http_client=client,
+                                    )
+                                    lang_desc = "אנגלית בלבד" if req_lang == "en" else ("ערבית בלבד" if req_lang == "ar" else "שתי השפות")
+                                    lang_html = (
+                                        f"🌐 <b>שפת הפוסטים שלך עודכנה ל-<code>{html.escape(req_lang)}</code> ({lang_desc})!</b>\n"
+                                        "תוכל לשנות שפה בכל עת:"
+                                    )
+                                    self._send_direct_message(
+                                        chat_id=cb_chat_id,
+                                        text_html=lang_html,
+                                        reply_markup=get_lang_keyboard(),
+                                        http_client=client,
+                                        repository=repository,
+                                    )
+                            elif cb_data.startswith("set_limit:"):
+                                limit_str = cb_data.split(":", 1)[1].strip()
+                                if limit_str.isdigit():
+                                    req_val = int(limit_str)
+                                    eff_limit = (
+                                        repository.update_subscriber_daily_limit(
+                                            cb_chat_id,
+                                            requested_limit=req_val,
+                                            max_ceiling=max_user_daily_limit,
+                                        )
+                                        if hasattr(repository, "update_subscriber_daily_limit")
+                                        else min(req_val, max_user_daily_limit)
+                                    )
+                                    summary["limit_updated"] += 1
+                                    self._answer_callback_query(
+                                        cb_id,
+                                        text=f"✅ מכסה עודכנה ל-{eff_limit}",
+                                        http_client=client,
+                                    )
+                                    limit_html = (
+                                        f"📊 <b>המכסה היומית שלך עודכנה ל-<code>{eff_limit}</code> פוסטים ביום!</b>\n"
+                                        "תוכל לעדכן בכל עת:"
+                                    )
+                                    self._send_direct_message(
+                                        chat_id=cb_chat_id,
+                                        text_html=limit_html,
+                                        reply_markup=get_limit_keyboard(max_user_daily_limit),
+                                        http_client=client,
+                                        repository=repository,
+                                    )
+                            elif cb_data == "menu:style":
+                                self._answer_callback_query(cb_id, http_client=client)
+                                style_html = (
+                                    "🎨 <b>בחירת סגנון תגובה ב-zioX:</b>\n"
+                                    "בחר את סגנון התגובות המועדף עליך באמצעות הכפתורים למטה:"
+                                )
+                                self._send_direct_message(
+                                    chat_id=cb_chat_id,
+                                    text_html=style_html,
+                                    reply_markup=get_style_keyboard(),
+                                    http_client=client,
+                                    repository=repository,
+                                )
+                            elif cb_data == "menu:lang":
+                                self._answer_callback_query(cb_id, http_client=client)
+                                lang_html = (
+                                    "🌐 <b>בחירת שפת פוסטים ב-zioX:</b>\n"
+                                    "ברירת המחדל היא <b>אנגלית בלבד</b> (<code>en</code>).\n"
+                                    "בחר שפה באמצעות הכפתורים למטה:"
+                                )
+                                self._send_direct_message(
+                                    chat_id=cb_chat_id,
+                                    text_html=lang_html,
+                                    reply_markup=get_lang_keyboard(),
+                                    http_client=client,
+                                    repository=repository,
+                                )
+                            elif cb_data == "menu:limit":
+                                self._answer_callback_query(cb_id, http_client=client)
+                                limit_html = (
+                                    f"📊 <b>עדכון מכסה יומית:</b>\n"
+                                    f"בחר את כמות הפוסטים היומית המועדפת עליך (עד {max_user_daily_limit} ביום):"
+                                )
+                                self._send_direct_message(
+                                    chat_id=cb_chat_id,
+                                    text_html=limit_html,
+                                    reply_markup=get_limit_keyboard(max_user_daily_limit),
+                                    http_client=client,
+                                    repository=repository,
+                                )
+                            elif cb_data == "menu:quota":
+                                self._answer_callback_query(cb_id, http_client=client)
+                                sub_info = repository.get_subscriber(cb_chat_id) if hasattr(repository, "get_subscriber") else None
+                                today_used = repository.get_subscriber_daily_count(cb_chat_id) if hasattr(repository, "get_subscriber_daily_count") else 0
+                                d_limit = int(sub_info.get("daily_limit", default_daily_limit)) if sub_info else default_daily_limit
+                                p_style = (sub_info.get("preferred_style") if sub_info else "any") or "any"
+                                p_lang = (sub_info.get("preferred_lang") if sub_info else "en") or "en"
+                                total_conf = int(sub_info.get("total_confirmed_replies", 0)) if sub_info else 0
+                                quota_html = (
+                                    "📊 <b>סטטוס המנוי שלך ב-zioX:</b>\n"
+                                    f"• <b>פוסטים היום:</b> <code>{today_used} / {d_limit}</code>\n"
+                                    f"• <b>תגובות שאושרו ב-X:</b> <code>{total_conf}</code>\n"
+                                    f"• <b>סגנון מועדף:</b> <code>{html.escape(p_style)}</code>\n"
+                                    f"• <b>שפה מועדפת:</b> <code>{html.escape(p_lang)}</code>"
+                                )
+                                self._send_direct_message(
+                                    chat_id=cb_chat_id,
+                                    text_html=quota_html,
+                                    reply_markup=get_main_menu_keyboard(),
+                                    http_client=client,
+                                    repository=repository,
+                                )
+                            elif cb_data == "menu:stop":
+                                repository.deactivate_subscriber(cb_chat_id)
+                                summary["stopped"] += 1
+                                self._answer_callback_query(cb_id, text="🛑 המנוי הושהה", http_client=client)
+                                stop_html = "🛑 <b>המנוי שלך ב-zioX הושהה.</b> תוכל לחזור בכל עת באמצעות שליחת <code>/start</code> או <code>/ready</code>."
+                                self._send_direct_message(
+                                    chat_id=cb_chat_id,
+                                    text_html=stop_html,
+                                    reply_markup={"inline_keyboard": [[{"text": "🚀 הפעל מחדש", "callback_data": "ready:confirm"}]]},
+                                    http_client=client,
+                                    repository=repository,
+                                )
+                            elif cb_data == "menu:main":
+                                self._answer_callback_query(cb_id, http_client=client)
+                                main_html = (
+                                    "⚙️ <b>תפריט ראשי zioX:</b>\n"
+                                    "בחר באחת האפשרויות למטה לניהול המנוי וההעדפות שלך:"
+                                )
+                                self._send_direct_message(
+                                    chat_id=cb_chat_id,
+                                    text_html=main_html,
+                                    reply_markup=get_main_menu_keyboard(),
                                     http_client=client,
                                     repository=repository,
                                 )
@@ -297,7 +676,7 @@ class TelegramDispatcher:
                             tier=tier,
                             daily_limit=limit,
                             preferred_style="any",
-                            preferred_lang="both",
+                            preferred_lang="en",
                             ready_confirmed=is_ready,
                             active=True,
                         )
@@ -305,22 +684,37 @@ class TelegramDispatcher:
                         welcome_html = (
                             "✅ <b>נרשמת בהצלחה ל-zioX!</b>\n"
                             "בסבב הסריקה הבא תקבל לכאן הצעות תגובה ייחודיות מבוססות מקורות מאומתים בלחיצה אחת.\n\n"
-                            "🎨 <b>בחירת סגנון אישי:</b> שלח <code>/style sharp</code>, <code>/style factual</code>, "
-                            "<code>/style historical_legal</code>, או <code>/style rhetorical_question</code>.\n"
-                            "🌐 <b>בחירת שפה:</b> שלח <code>/lang en</code>, <code>/lang ar</code>, או <code>/lang both</code>.\n"
-                            "📊 <b>מכסה יומית:</b> שלח <code>/limit 3</code> לעדכון כמות יומית או <code>/quota</code> לבדיקת מצב.\n"
-                            "✋ <b>וידוא פעילות:</b> לחץ על הכפתור למטה (או שלח <code>/ready</code>) כדי לאשר שאתה מוכן להגיב!\n"
+                            "🌐 <b>שפת ברירת מחדל:</b> אנגלית בלבד (<code>en</code>).\n\n"
+                            "🎨 <b>בחירת סגנון אישי:</b> <code>/style</code> (או לחץ על הכפתור למטה)\n"
+                            "🌐 <b>בחירת שפה:</b> <code>/lang</code> (או לחץ על הכפתור למטה)\n"
+                            "📊 <b>מכסה יומית:</b> <code>/limit</code> (או <code>/quota</code> לבדיקת מצב)\n"
+                            "✋ <b>וידוא מוכנות:</b> לחץ על הכפתור <b>✅ אני מוכן להגיב</b> (או שלח <code>/ready</code>)\n"
                             "🛑 להפסקה בכל עת שלח <code>/stop</code>."
                         )
-                        ready_markup = {
-                            "inline_keyboard": [
-                                [{"text": "✅ אני מוכן להגיב", "callback_data": "ready:confirm"}]
-                            ]
-                        }
                         self._send_direct_message(
                             chat_id=chat_id,
                             text_html=welcome_html,
-                            reply_markup=ready_markup,
+                            reply_markup=get_main_menu_keyboard(),
+                            http_client=client,
+                            repository=repository,
+                        )
+
+                    elif lower_text.startswith("/help"):
+                        help_html = (
+                            "📖 <b>מדריך פקודות ותפריט zioX:</b>\n\n"
+                            "• <code>/start</code> - הרשמה והפעלת המנוי\n"
+                            "• <code>/ready</code> - אישור מוכנות לקבלת פוסטים להגבה\n"
+                            "• <code>/style</code> - בחירת סגנון תגובות מועדף\n"
+                            "• <code>/lang</code> - בחירת שפת פוסטים (ברירת מחדל: אנגלית <code>en</code>)\n"
+                            "• <code>/limit</code> - עדכון מכסה יומית (1 עד 5 פוסטים)\n"
+                            "• <code>/quota</code> - בדיקת מצב המכסה וההגדרות שלך\n"
+                            "• <code>/stop</code> - השהיית קבלת פוסטים\n\n"
+                            "👇 <b>ניתן ללחוץ על הכפתורים למטה לניהול מהיר:</b>"
+                        )
+                        self._send_direct_message(
+                            chat_id=chat_id,
+                            text_html=help_html,
+                            reply_markup=get_main_menu_keyboard(),
                             http_client=client,
                             repository=repository,
                         )
@@ -336,6 +730,7 @@ class TelegramDispatcher:
                         self._send_direct_message(
                             chat_id=chat_id,
                             text_html=ready_html,
+                            reply_markup=get_main_menu_keyboard(),
                             http_client=client,
                             repository=repository,
                         )
@@ -347,6 +742,7 @@ class TelegramDispatcher:
                         self._send_direct_message(
                             chat_id=chat_id,
                             text_html=stop_html,
+                            reply_markup={"inline_keyboard": [[{"text": "🚀 הפעל מחדש", "callback_data": "ready:confirm"}]]},
                             http_client=client,
                             repository=repository,
                         )
@@ -362,23 +758,25 @@ class TelegramDispatcher:
                                     tier="admin" if chat_id in self.chat_ids else "free",
                                     daily_limit=100 if chat_id in self.chat_ids else default_daily_limit,
                                     preferred_style=requested_style,
+                                    preferred_lang="en",
                                     active=True,
                                 )
                             repository.update_subscriber_style(chat_id, requested_style)
                             summary["style_updated"] += 1
                             style_html = (
                                 f"🎨 <b>סגנון התגובות שלך עודכן ל-<code>{html.escape(requested_style)}</code>!</b>\n"
-                                "בסבבים הבאים נתעדף עבורך וריאציות בסגנון זה."
+                                "בסבבים הבאים נתעדף עבורך וריאציות בסגנון זה.\n"
+                                "תוכל להחליף סגנון בכל עת בכפתורים למטה:"
                             )
                         else:
-                            valid_list = ", ".join(sorted(VALID_STYLES))
                             style_html = (
-                                f"ℹ️ <b>בחירת סגנון תגובה ב-zioX:</b>\n"
-                                f"שלח <code>/style &lt;name&gt;</code> עם אחת האפשרויות: <code>{valid_list}</code>"
+                                "🎨 <b>בחירת סגנון תגובה ב-zioX:</b>\n"
+                                "בחר את הסגנון המועדף עליך באמצעות הכפתורים למטה, או שלח <code>/style &lt;name&gt;</code>:"
                             )
                         self._send_direct_message(
                             chat_id=chat_id,
                             text_html=style_html,
+                            reply_markup=get_style_keyboard(),
                             http_client=client,
                             repository=repository,
                         )
@@ -397,17 +795,21 @@ class TelegramDispatcher:
                             if hasattr(repository, "update_subscriber_language"):
                                 repository.update_subscriber_language(chat_id, requested_lang)
                             summary["lang_updated"] += 1
+                            lang_desc = "אנגלית בלבד" if requested_lang == "en" else ("ערבית בלבד" if requested_lang == "ar" else "שתי השפות")
                             lang_html = (
-                                f"🌐 <b>שפת הפוסטים שלך עודכנה ל-<code>{html.escape(requested_lang)}</code>!</b>"
+                                f"🌐 <b>שפת הפוסטים שלך עודכנה ל-<code>{html.escape(requested_lang)}</code> ({lang_desc})!</b>\n"
+                                "תוכל להחליף שפה בכל עת בכפתורים למטה:"
                             )
                         else:
                             lang_html = (
-                                "ℹ️ <b>בחירת שפת פוסטים ב-zioX:</b>\n"
-                                "שלח <code>/lang en</code> (אנגלית בלבד), <code>/lang ar</code> (ערבית בלבד), או <code>/lang both</code> (שתי השפות)."
+                                "🌐 <b>בחירת שפת פוסטים ב-zioX:</b>\n"
+                                "ברירת המחדל היא <b>אנגלית בלבד</b> (<code>en</code>).\n"
+                                "בחר שפה באמצעות הכפתורים למטה, או שלח <code>/lang &lt;en|ar|both&gt;</code>:"
                             )
                         self._send_direct_message(
                             chat_id=chat_id,
                             text_html=lang_html,
+                            reply_markup=get_lang_keyboard(),
                             http_client=client,
                             repository=repository,
                         )
@@ -422,6 +824,7 @@ class TelegramDispatcher:
                                     chat_id=chat_id,
                                     username=str(username),
                                     daily_limit=min(req_val, max_user_daily_limit),
+                                    preferred_lang="en",
                                     active=True,
                                 )
                             effective_limit = (
@@ -437,20 +840,24 @@ class TelegramDispatcher:
                             if effective_limit < req_val:
                                 limit_html = (
                                     f"📊 <b>המכסה היומית שלך עודכנה ל-<code>{effective_limit}</code> פוסטים ביום</b> "
-                                    f"(התקרה המרכזית המותרת למנוי שלך היא {effective_limit})."
+                                    f"(התקרה המרכזית המותרת למנוי שלך היא {effective_limit}).\n"
+                                    "תוכל לעדכן בכל עת בכפתורים למטה:"
                                 )
                             else:
                                 limit_html = (
-                                    f"📊 <b>המכסה היומית שלך עודכנה ל-<code>{effective_limit}</code> פוסטים ביום!</b>"
+                                    f"📊 <b>המכסה היומית שלך עודכנה ל-<code>{effective_limit}</code> פוסטים ביום!</b>\n"
+                                    "תוכל לעדכן בכל עת בכפתורים למטה:"
                                 )
                         else:
                             limit_html = (
                                 f"ℹ️ <b>עדכון מכסה יומית:</b> שלח <code>/limit &lt;1-{max_user_daily_limit}&gt;</code> "
-                                f"(לדוגמה: <code>/limit 4</code>)."
+                                f"(לדוגמה: <code>/limit 4</code>).\n"
+                                "או בחר ישירות באחד הכפתורים למטה:"
                             )
                         self._send_direct_message(
                             chat_id=chat_id,
                             text_html=limit_html,
+                            reply_markup=get_limit_keyboard(max_user_daily_limit),
                             http_client=client,
                             repository=repository,
                         )
@@ -460,7 +867,7 @@ class TelegramDispatcher:
                         today_used = repository.get_subscriber_daily_count(chat_id) if hasattr(repository, "get_subscriber_daily_count") else 0
                         d_limit = int(sub_info.get("daily_limit", default_daily_limit)) if sub_info else default_daily_limit
                         p_style = (sub_info.get("preferred_style") if sub_info else "any") or "any"
-                        p_lang = (sub_info.get("preferred_lang") if sub_info else "both") or "both"
+                        p_lang = (sub_info.get("preferred_lang") if sub_info else "en") or "en"
                         total_conf = int(sub_info.get("total_confirmed_replies", 0)) if sub_info else 0
                         quota_html = (
                             "📊 <b>סטטוס המנוי שלך ב-zioX:</b>\n"
@@ -472,6 +879,7 @@ class TelegramDispatcher:
                         self._send_direct_message(
                             chat_id=chat_id,
                             text_html=quota_html,
+                            reply_markup=get_main_menu_keyboard(),
                             http_client=client,
                             repository=repository,
                         )
@@ -512,7 +920,7 @@ class TelegramDispatcher:
                     if db_admin_id not in admin_targets:
                         admin_targets.append(db_admin_id)
             except Exception as e:
-                logger.warning(f"[TelegramDispatcher] Could not query admin chat IDs: {e}")
+                logger.warning(f"[TelegramDispatcher] Could not query admin chat IDs: {mask_telegram_token(e)}")
 
         if not admin_targets:
             logger.warning("[TelegramDispatcher] No admin chat IDs configured for send_admin_alert.")
@@ -644,7 +1052,7 @@ class TelegramDispatcher:
                     resp.raise_for_status()
                     logger.info(f"[TelegramDispatcher] Dispatched review card to chat {clean_cid}")
                 except Exception as e:
-                    logger.error(f"[TelegramDispatcher] Failed to send to chat {clean_cid}: {e}")
+                    logger.error(f"[TelegramDispatcher] Failed to send to chat {clean_cid}: {mask_telegram_token(e)}")
                     overall_success = False
             return overall_success
 
@@ -728,7 +1136,7 @@ class TelegramDispatcher:
                         tier="admin",
                         daily_limit=100,
                         preferred_style="any",
-                        preferred_lang="both",
+                        preferred_lang="en",
                         ready_confirmed=True,
                         active=True,
                     )
