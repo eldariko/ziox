@@ -482,6 +482,8 @@ export default {
             "• <code>/limit</code> - עדכון מכסה יומית (1 עד 5 פוסטים)\n" +
             "• <code>/quota</code> - בדיקת מצב המכסה וההגדרות שלך\n" +
             "• <code>/stop</code> - השהיית קבלת פוסטים\n\n" +
+            "💡 <b>טיפ לשמירה על הפיד האישי:</b>\n" +
+            "רוצה להגן על הפיד האישי שלך? פתח חשבון X משני להסברה, חבר אותו באפליקציה ועבור אליו בלחיצה ארוכה על תמונת הפרופיל לפני שמגיבים!\n\n" +
             "👇 <b>ניתן ללחוץ על הכפתורים למטה לניהול מהיר:</b>";
           await sendTelegramMessage(env, chatId, helpHtml, getMainMenuKeyboard());
         } else if (lowerText.startsWith("/ready")) {
