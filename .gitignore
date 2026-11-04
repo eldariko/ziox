@@ -13,3 +13,5 @@ build/
 dist/
 .wrangler/
 node_modules/
+cookies.json
+.agent-output/
