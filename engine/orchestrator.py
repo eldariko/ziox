@@ -672,18 +672,12 @@ class BotOrchestrator:
         Evaluates virality, checks thread permissions, runs Gemini grounding (in cohort batches),
         prompts in interactive mode (if enabled), applies stealth pacing & link diversity,
         and publishes or dispatches the verified reply variations.
-
-        When `allow_multi_wave_in_run=True` (used by `run_full_pipeline` for demand-driven scaling),
-        if available subscribers still haven't received a post in this run after the first pass
-        through distinct queued tweets, continues iterating additional waves on `DISPATCHED_WAVE`
-        tweets until 100% of available subscribers have received at least one post or no eligible
-        tweets/subscribers remain.
         """
         current_monthly_count = self.repo.get_monthly_reply_count()
         if current_monthly_count >= self.settings.monthly_max_replies:
             msg = f"Monthly reply ceiling reached ({current_monthly_count}/{self.settings.monthly_max_replies}). Process aborted."
             logger.warning(msg)
-            return {"status": "QUOTA_EXCEEDED", "processed": 0, "replies_sent": 0, "details": msg}
+            return {"status": "QUOTA_EXCEEDED", "processed": 0, "replies_sent": 0, "details": msg, "evaluations": [], "results": []}
 
         self._sync_telegram_subscribers_if_enabled(interactive=interactive)
 
@@ -720,12 +714,13 @@ class BotOrchestrator:
         pending_items = _fetch_pending()
         if not pending_items:
             logger.info("No candidate tweets found in queue.")
-            return {"status": "EMPTY_QUEUE", "processed": 0, "replies_sent": 0, "results": []}
+            return {"status": "EMPTY_QUEUE", "processed": 0, "replies_sent": 0, "evaluations": [], "results": []}
 
         processed_count = 0
         replies_sent = 0
         total_subscribers_dispatched = 0
         results: List[Dict[str, Any]] = []
+        evaluations: List[Dict[str, Any]] = []
 
         max_passes = max(1, cycle_cap) if (allow_multi_wave_in_run and self.settings.telegram_review_enabled and not interactive) else 1
 
@@ -767,6 +762,18 @@ class BotOrchestrator:
                     else:
                         logger.warning(f"Could not retrieve tweet text for {tweet_id}. Skipping.")
                         self.repo.update_tweet_status(tweet_id, status="SKIPPED")
+                        evaluations.append({
+                            "tweet_id": tweet_id,
+                            "author": author,
+                            "virality_score": score,
+                            "tier": "Unknown",
+                            "decision": "SKIPPED",
+                            "reason": "Could not retrieve tweet text from Twitter provider",
+                            "claim": None,
+                            "facts": [],
+                            "link": None,
+                            "status": "SKIPPED",
+                        })
                         continue
 
                 processed_count += 1
@@ -779,11 +786,25 @@ class BotOrchestrator:
                     in_reply_to_tweet_id=parent_id
                 )
 
+                tier = get_virality_tier(tweet_obj)
+
                 # 2. Thread Permission & Toxicity Check
                 can_reply, thread_reason = self.thread_manager.evaluate_thread_permission(tweet_obj)
                 if not can_reply:
                     self.repo.update_tweet_status(tweet_id, status="SKIPPED")
                     logger.info(f"Skipping queued tweet {tweet_id}: {thread_reason}")
+                    evaluations.append({
+                        "tweet_id": tweet_id,
+                        "author": author,
+                        "virality_score": score,
+                        "tier": tier,
+                        "decision": "SKIPPED",
+                        "reason": thread_reason,
+                        "claim": None,
+                        "facts": [],
+                        "link": None,
+                        "status": "SKIPPED",
+                    })
                     continue
 
                 # 3. Fact Grounding & Verification (Cohort-Sized Batch Generation)
@@ -796,6 +817,19 @@ class BotOrchestrator:
                 if not eval_result.is_worth_replying or not eval_result.draft_reply:
                     self.repo.update_tweet_status(tweet_id, status="SKIPPED")
                     logger.info(f"Tweet {tweet_id} not worth replying (factual claim missing or unsupported).")
+                    reason = getattr(eval_result, "reasoning", "Factual claim missing or unsupported") or "Factual claim missing or unsupported"
+                    evaluations.append({
+                        "tweet_id": tweet_id,
+                        "author": author,
+                        "virality_score": score,
+                        "tier": tier,
+                        "decision": "SKIPPED",
+                        "reason": reason,
+                        "claim": eval_result.claim_identified,
+                        "facts": eval_result.verified_facts or [],
+                        "link": None,
+                        "status": "SKIPPED",
+                    })
                     continue
 
                 # 4. Anti-Bot Humanizer with Link Diversity Check
@@ -808,7 +842,6 @@ class BotOrchestrator:
 
                 # 5. Interactive Human-in-the-Loop review
                 if interactive:
-                    tier = get_virality_tier(tweet_obj)
                     char_count = Humanizer.calculate_tweet_length(final_reply)
                     print("\n" + "=" * 65)
                     print("           [HUMAN-IN-THE-LOOP INTERACTIVE REVIEW]")
@@ -834,6 +867,18 @@ class BotOrchestrator:
                     elif choice == "s":
                         print(f"[zioX] Tweet {tweet_id} skipped per user instruction.")
                         self.repo.update_tweet_status(tweet_id, status="SKIPPED")
+                        evaluations.append({
+                            "tweet_id": tweet_id,
+                            "author": author,
+                            "virality_score": score,
+                            "tier": tier,
+                            "decision": "SKIPPED",
+                            "reason": "Skipped per user instruction in interactive review",
+                            "claim": eval_result.claim_identified,
+                            "facts": eval_result.verified_facts or [],
+                            "link": None,
+                            "status": "SKIPPED",
+                        })
                         continue
                     elif choice == "e":
                         try:
@@ -853,9 +898,8 @@ class BotOrchestrator:
                 # Ensure final reply does not exceed Twitter 280 limit before dispatching
                 final_reply = Humanizer.enforce_length_limit(final_reply, max_length=280)
 
-                # Telegram Review Dispatch in queue processing (Asynchronous Human-in-the-Loop & Multi-User Sharding)
+                # 6. Telegram Review Dispatch in queue processing
                 if self.settings.telegram_review_enabled and not interactive:
-                    tier = get_virality_tier(tweet_obj)
                     dispatched, next_status, sent_cnt = self._dispatch_to_telegram_community(
                         tweet=tweet_obj,
                         virality_score=score,
@@ -887,6 +931,19 @@ class BotOrchestrator:
                         "status": next_status,
                         "subscribers_served": sent_cnt,
                     })
+                    evaluations.append({
+                        "tweet_id": tweet_id,
+                        "author": author,
+                        "virality_score": score,
+                        "tier": tier,
+                        "decision": "APPROVED",
+                        "reason": None,
+                        "claim": eval_result.claim_identified,
+                        "facts": eval_result.verified_facts or [],
+                        "link": effective_link,
+                        "status": next_status,
+                        "draft_reply": final_reply,
+                    })
 
                     if replies_sent >= cycle_cap:
                         logger.info(
@@ -898,10 +955,10 @@ class BotOrchestrator:
                         break
                     continue
 
-                # 6. Apply stealth delay before consecutive replies
+                # 7. Apply stealth delay before consecutive replies
                 self._apply_stealth_delay(replies_sent)
 
-                # 7. Publish or Dry-Run
+                # 8. Publish or Dry-Run
                 was_published = False
                 if self.settings.dry_run:
                     logger.info(f"[DRY RUN] Would reply to @{author} ({tweet_id}): {final_reply}")
@@ -933,6 +990,19 @@ class BotOrchestrator:
                     except Exception as e:
                         logger.error(f"Failed publishing reply to {tweet_id}: {e}")
                         self.repo.update_tweet_status(tweet_id, status="FAILED")
+                        evaluations.append({
+                            "tweet_id": tweet_id,
+                            "author": author,
+                            "virality_score": score,
+                            "tier": tier,
+                            "decision": "APPROVED",
+                            "reason": f"Publishing failed: {e}",
+                            "claim": eval_result.claim_identified,
+                            "facts": eval_result.verified_facts or [],
+                            "link": effective_link,
+                            "status": "FAILED",
+                            "draft_reply": final_reply,
+                        })
                         continue
 
                 results.append({
@@ -942,6 +1012,19 @@ class BotOrchestrator:
                     "claim": eval_result.claim_identified,
                     "reply": final_reply,
                     "published": was_published
+                })
+                evaluations.append({
+                    "tweet_id": tweet_id,
+                    "author": author,
+                    "virality_score": score,
+                    "tier": tier,
+                    "decision": "APPROVED",
+                    "reason": None,
+                    "claim": eval_result.claim_identified,
+                    "facts": eval_result.verified_facts or [],
+                    "link": effective_link,
+                    "status": "PUBLISHED" if was_published else "PROCESSED_DRY_RUN",
+                    "draft_reply": final_reply,
                 })
 
                 # Check cycle cap
@@ -969,6 +1052,7 @@ class BotOrchestrator:
             "processed": processed_count,
             "replies_sent": replies_sent,
             "subscribers_served": total_subscribers_dispatched,
+            "evaluations": evaluations,
             "results": results
         }
 
@@ -989,8 +1073,14 @@ class BotOrchestrator:
         5. Runs Discovery Radar to search keywords and enqueue viral posts (up to `max_tweet_age_hours`).
         6. Processes pending queue with multi-wave cohort iteration so 100% of available subscribers
            receive at least one candidate post per run.
-        7. Returns full run execution metrics.
+        7. Automatically generates and publishes a visual Markdown Execution Summary ($GITHUB_STEP_SUMMARY).
+        8. Returns full run execution metrics.
         """
+        if hasattr(self.telegram, "clear_last_dispatches"):
+            self.telegram.clear_last_dispatches()
+
+        pending_before = self.repo.get_pending_tweets(limit=100) if hasattr(self.repo, "get_pending_tweets") else []
+
         # 1. Start Jitter Calculation
         max_jitter = self.settings.start_jitter_max_minutes if start_jitter_minutes is None else start_jitter_minutes
         if max_jitter > 0:
@@ -1007,15 +1097,31 @@ class BotOrchestrator:
             msg = f"Monthly reply ceiling reached ({current_monthly_count}/{self.settings.monthly_max_replies}). Pipeline halted."
             logger.warning(msg)
             self.repo.log_run(0, 0, "ABORTED_QUOTA_EXCEEDED", msg)
-            return {
+            report = {
                 "status": "QUOTA_EXCEEDED",
                 "discovered_count": 0,
                 "discovered_tweets": [],
                 "processed": 0,
                 "replies_sent": 0,
+                "subscribers_served": 0,
                 "details": msg,
-                "results": []
+                "results": [],
+                "evaluations": [],
+                "pending_before_count": len(pending_before),
+                "pending_after_count": len(pending_before),
+                "pending_after_items": pending_before,
+                "dispatches": [],
             }
+            try:
+                from engine.summary_reporter import SummaryReporter
+                SummaryReporter.generate_and_publish(
+                    run_report=report,
+                    settings=self.settings,
+                    repository=self.repo,
+                )
+            except Exception as e:
+                logger.debug(f"Could not publish quota step summary: {e}")
+            return report
 
         # Sync subscribers early
         self._sync_telegram_subscribers_if_enabled(interactive=interactive)
@@ -1067,15 +1173,31 @@ class BotOrchestrator:
                 err_msg = f"Discovery Radar failed: {e}"
                 logger.error(err_msg)
                 self.repo.log_run(0, 0, "RADAR_ERROR", err_msg)
-                return {
+                report = {
                     "status": "RADAR_ERROR",
                     "discovered_count": 0,
                     "discovered_tweets": [],
                     "processed": 0,
                     "replies_sent": 0,
+                    "subscribers_served": 0,
                     "details": err_msg,
-                    "results": []
+                    "results": [],
+                    "evaluations": [],
+                    "pending_before_count": len(pending_before),
+                    "pending_after_count": len(pending_before),
+                    "pending_after_items": pending_before,
+                    "dispatches": [],
                 }
+                try:
+                    from engine.summary_reporter import SummaryReporter
+                    SummaryReporter.generate_and_publish(
+                        run_report=report,
+                        settings=self.settings,
+                        repository=self.repo,
+                    )
+                except Exception:
+                    pass
+                return report
 
         # 4. Queue Responder Dispatch (with multi-wave iteration enabled for full demand coverage)
         effective_cap = self._get_effective_cycle_cap(interactive=interactive, demand_total=demand_total)
@@ -1088,7 +1210,10 @@ class BotOrchestrator:
             allow_multi_wave_in_run=True,
         )
 
-        return {
+        pending_after = self.repo.get_pending_tweets(limit=100) if hasattr(self.repo, "get_pending_tweets") else []
+        dispatches = self.telegram.get_last_dispatches() if hasattr(self.telegram, "get_last_dispatches") else []
+
+        full_report = {
             "status": queue_report.get("status", "SUCCESS"),
             "discovered_count": len(discovered),
             "discovered_tweets": discovered,
@@ -1096,5 +1221,24 @@ class BotOrchestrator:
             "replies_sent": queue_report.get("replies_sent", 0),
             "subscribers_served": queue_report.get("subscribers_served", 0),
             "demand": demand,
-            "results": queue_report.get("results", [])
+            "results": queue_report.get("results", []),
+            "evaluations": queue_report.get("evaluations", []),
+            "radar_scan_stats": getattr(radar, "last_scan_stats", None),
+            "pending_before_count": len(pending_before),
+            "pending_after_count": len(pending_after),
+            "pending_after_items": pending_after,
+            "dispatches": dispatches,
         }
+
+        # Auto-publish GitHub Actions Step Summary if GITHUB_STEP_SUMMARY is configured
+        try:
+            from engine.summary_reporter import SummaryReporter
+            SummaryReporter.generate_and_publish(
+                run_report=full_report,
+                settings=self.settings,
+                repository=self.repo,
+            )
+        except Exception as summary_err:
+            logger.warning(f"Failed generating step summary: {summary_err}")
+
+        return full_report

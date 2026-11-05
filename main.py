@@ -3,6 +3,7 @@
 import argparse
 import sys
 import logging
+import os
 import time
 from datetime import datetime
 
@@ -19,6 +20,7 @@ from engine.grounding import GroundingEngine
 from engine.orchestrator import BotOrchestrator
 from engine.radar import DiscoveryRadar, extract_tweet_id
 from engine.telegram_dispatcher import TelegramDispatcher
+from engine.summary_reporter import SummaryReporter
 
 from engine.security import setup_secure_logging
 
@@ -214,6 +216,12 @@ def main():
         "-i", "--interactive",
         action="store_true",
         help="Enable Human-in-the-Loop review mode before any reply is sent"
+    )
+    parser.add_argument(
+        "--summary-file",
+        type=str,
+        default=None,
+        help="Optional path to write visual Markdown report (defaults to GITHUB_STEP_SUMMARY if set in environment)"
     )
 
     args = parser.parse_args()
@@ -417,6 +425,17 @@ def main():
                 print(f"   Claim: {item['claim']}")
                 print(f"   Reply: {item['reply']}")
                 print(f"   Published: {item['published']}\n")
+
+        if args.summary_file:
+            written_to = SummaryReporter.generate_and_publish(
+                run_report=report,
+                settings=settings,
+                repository=repo,
+                target_file=args.summary_file,
+            )
+            if written_to:
+                print(f"[zioX Summary] Markdown report written to: {written_to}")
+
         show_status(repo, settings)
         return
 
@@ -439,6 +458,17 @@ def main():
                 print(f"   Claim: {item['claim']}")
                 print(f"   Reply: {item['reply']}")
                 print(f"   Published: {item['published']}\n")
+
+        if args.summary_file or os.environ.get("GITHUB_STEP_SUMMARY"):
+            written_to = SummaryReporter.generate_and_publish(
+                run_report=report,
+                settings=settings,
+                repository=repo,
+                target_file=args.summary_file,
+            )
+            if written_to:
+                print(f"[zioX Summary] Markdown report written to: {written_to}")
+
         show_status(repo, settings)
         return
 
@@ -457,6 +487,17 @@ def main():
                 print(f"   Claim: {item['claim']}")
                 print(f"   Reply: {item['reply']}")
                 print(f"   Published: {item['published']}\n")
+
+        if args.summary_file or os.environ.get("GITHUB_STEP_SUMMARY"):
+            written_to = SummaryReporter.generate_and_publish(
+                run_report=report,
+                settings=settings,
+                repository=repo,
+                target_file=args.summary_file,
+            )
+            if written_to:
+                print(f"[zioX Summary] Markdown report written to: {written_to}")
+
         show_status(repo, settings)
 
 
