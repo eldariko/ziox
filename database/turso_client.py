@@ -1,11 +1,12 @@
 """Native Turso Cloud SQLite HTTP Client using /v2/pipeline.
 
 Bypasses legacy websocket (hrana2) and /v1/execute deprecations without external native binary dependencies.
-Built entirely on top of standard httpx.
+Built entirely on top of standard httpx with connection pooling and resilient retry logic.
 """
 
 import base64
 import logging
+import time
 from typing import Any, Dict, List, Optional, Sequence, Union
 import httpx
 
@@ -50,7 +51,14 @@ class TursoResultSet:
 class TursoClient:
     """Synchronous HTTP client for Turso / libSQL SQLite databases using /v2/pipeline."""
 
-    def __init__(self, url: str, auth_token: Optional[str] = None, timeout: float = 15.0):
+    def __init__(
+        self,
+        url: str,
+        auth_token: Optional[str] = None,
+        timeout: float = 15.0,
+        max_retries: int = 3,
+        backoff_factor: float = 0.5,
+    ):
         clean_url = (url or "").strip()
         if clean_url.startswith("libsql://"):
             clean_url = "https://" + clean_url[len("libsql://"):]
@@ -65,7 +73,32 @@ class TursoClient:
         self.pipeline_url = f"{self.base_url}/v2/pipeline"
         self.auth_token = auth_token
         self.timeout = timeout
-        self._session = httpx.Client(timeout=self.timeout)
+        self.max_retries = max(1, max_retries)
+        self.backoff_factor = max(0.0, backoff_factor)
+        self._limits = httpx.Limits(
+            max_keepalive_connections=5,
+            max_connections=10,
+            keepalive_expiry=30.0,
+        )
+        self._session = self._create_session()
+
+    def _create_session(self) -> httpx.Client:
+        """Create a configured httpx client session with keep-alive limits."""
+        return httpx.Client(timeout=self.timeout, limits=self._limits)
+
+    def _recreate_session(self) -> None:
+        """Safely dispose of the old session and create a fresh one."""
+        old_session = getattr(self, "_session", None)
+        try:
+            if old_session is not None and not getattr(old_session, "is_closed", True):
+                old_session.close()
+        except Exception as e:
+            logger.debug(f"[TursoClient] Error closing stale session: {e}")
+        self._session = self._create_session()
+
+    def _send_request(self, payload: Dict[str, Any], headers: Dict[str, str]) -> httpx.Response:
+        """Send the raw POST request to Turso pipeline endpoint."""
+        return self._session.post(self.pipeline_url, json=payload, headers=headers)
 
     def close(self) -> None:
         """Close the underlying HTTP client session cleanly."""
@@ -116,7 +149,7 @@ class TursoClient:
         return cell.get("value", "")
 
     def execute(self, stmt: str, args: Optional[Sequence[Any]] = None) -> TursoResultSet:
-        """Execute a SQL statement against Turso via /v2/pipeline."""
+        """Execute a SQL statement against Turso via /v2/pipeline with automatic retry on transient errors."""
         proto_args = [self._to_proto_value(v) for v in (args or [])]
         payload = {
             "requests": [
@@ -138,40 +171,71 @@ class TursoClient:
         if self.auth_token:
             headers["Authorization"] = f"Bearer {self.auth_token}"
 
-        resp = self._session.post(self.pipeline_url, json=payload, headers=headers)
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Turso HTTP request failed (status {resp.status_code}): {resp.text}"
-            )
+        last_transport_exc: Optional[Exception] = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                resp = self._send_request(payload, headers)
 
-        data = resp.json()
-        results = data.get("results", [])
-        if not results:
-            return TursoResultSet([], [], 0, None)
+                # Transient gateway / edge errors (502, 503, 504)
+                if resp.status_code in (502, 503, 504) and attempt < self.max_retries:
+                    delay = self.backoff_factor * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"[TursoClient] Turso cloud unavailable (HTTP {resp.status_code}, attempt {attempt}/{self.max_retries}). Retrying in {delay:.1f}s..."
+                    )
+                    time.sleep(delay)
+                    continue
 
-        first_res = results[0]
-        if first_res.get("type") == "error":
-            err = first_res.get("error", {})
-            raise RuntimeError(
-                f"Turso SQLite Error: {err.get('message', 'Unknown error')} (code: {err.get('code')})"
-            )
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"Turso HTTP request failed (status {resp.status_code}): {resp.text}"
+                    )
 
-        stmt_result = first_res.get("response", {}).get("result", {})
-        cols = [c.get("name") or "" for c in stmt_result.get("cols", [])]
-        raw_rows = stmt_result.get("rows", [])
+                data = resp.json()
+                results = data.get("results", [])
+                if not results:
+                    return TursoResultSet([], [], 0, None)
 
-        rows: List[TursoRow] = []
-        for raw_row in raw_rows:
-            row_vals = [self._from_proto_value(cell) for cell in raw_row]
-            rows.append(TursoRow(cols, row_vals))
+                first_res = results[0]
+                if first_res.get("type") == "error":
+                    err = first_res.get("error", {})
+                    raise RuntimeError(
+                        f"Turso SQLite Error: {err.get('message', 'Unknown error')} (code: {err.get('code')})"
+                    )
 
-        rows_affected = stmt_result.get("affected_row_count", 0)
-        raw_last_id = stmt_result.get("last_insert_rowid")
-        last_insert_rowid = int(raw_last_id) if raw_last_id is not None else None
+                stmt_result = first_res.get("response", {}).get("result", {})
+                cols = [c.get("name") or "" for c in stmt_result.get("cols", [])]
+                raw_rows = stmt_result.get("rows", [])
 
-        return TursoResultSet(
-            columns=cols,
-            rows=rows,
-            rows_affected=rows_affected,
-            last_insert_rowid=last_insert_rowid
-        )
+                rows: List[TursoRow] = []
+                for raw_row in raw_rows:
+                    row_vals = [self._from_proto_value(cell) for cell in raw_row]
+                    rows.append(TursoRow(cols, row_vals))
+
+                rows_affected = stmt_result.get("affected_row_count", 0)
+                raw_last_id = stmt_result.get("last_insert_rowid")
+                last_insert_rowid = int(raw_last_id) if raw_last_id is not None else None
+
+                return TursoResultSet(
+                    columns=cols,
+                    rows=rows,
+                    rows_affected=rows_affected,
+                    last_insert_rowid=last_insert_rowid
+                )
+
+            except httpx.TransportError as exc:
+                last_transport_exc = exc
+                if attempt < self.max_retries:
+                    delay = self.backoff_factor * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"[TursoClient] Transport error ({type(exc).__name__}: {exc}) on attempt {attempt}/{self.max_retries}. Reconnecting and retrying in {delay:.1f}s..."
+                    )
+                    self._recreate_session()
+                    time.sleep(delay)
+                else:
+                    logger.error(
+                        f"[TursoClient] Transport error ({type(exc).__name__}: {exc}) on final attempt {attempt}/{self.max_retries}."
+                    )
+                    raise
+
+        if last_transport_exc:
+            raise last_transport_exc

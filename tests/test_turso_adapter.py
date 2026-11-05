@@ -3,6 +3,7 @@
 import pytest
 import os
 from unittest.mock import MagicMock, patch
+import httpx
 from database.repository import Repository
 from database.turso_client import TursoClient, TursoRow, TursoResultSet
 from database.schema import INIT_STATEMENTS
@@ -87,6 +88,95 @@ def test_turso_client_execute_pipeline():
         assert call_kwargs["json"]["requests"][0]["stmt"]["sql"] == "SELECT id, author FROM users WHERE id = ?"
         assert call_kwargs["json"]["requests"][0]["stmt"]["args"] == [{"type": "integer", "value": "1"}]
 
+    client.close()
+
+
+def test_turso_client_retry_on_remote_protocol_error():
+    """Verify TursoClient retries and recreates session on RemoteProtocolError / transport failure."""
+    client = TursoClient("https://mock-db.turso.io", auth_token="token_xyz", max_retries=3, backoff_factor=0.0)
+
+    mock_ok_resp = MagicMock()
+    mock_ok_resp.status_code = 200
+    mock_ok_resp.json.return_value = {
+        "results": [
+            {
+                "type": "ok",
+                "response": {
+                    "type": "execute",
+                    "result": {
+                        "cols": [{"name": "cnt"}],
+                        "rows": [[{"type": "integer", "value": "42"}]],
+                        "affected_row_count": 0
+                    }
+                }
+            }
+        ]
+    }
+
+    with patch.object(
+        client,
+        "_send_request",
+        side_effect=[
+            httpx.RemoteProtocolError("Server disconnected without sending a response."),
+            mock_ok_resp
+        ]
+    ) as mock_send, patch.object(client, "_recreate_session", wraps=client._recreate_session) as mock_recreate:
+        res = client.execute("SELECT count(*) as cnt FROM dispatches")
+        assert len(res) == 1
+        assert res.rows[0]["cnt"] == 42
+        assert mock_send.call_count == 2
+        mock_recreate.assert_called_once()
+
+    client.close()
+
+
+def test_turso_client_retry_on_cloud_edge_503():
+    """Verify TursoClient retries on transient cloud 503 / 502 / 504 errors."""
+    client = TursoClient("https://mock-db.turso.io", max_retries=3, backoff_factor=0.0)
+
+    mock_503_resp = MagicMock(status_code=503, text="Service Unavailable")
+    mock_200_resp = MagicMock(status_code=200)
+    mock_200_resp.json.return_value = {
+        "results": [
+            {
+                "type": "ok",
+                "response": {
+                    "type": "execute",
+                    "result": {"cols": [], "rows": []}
+                }
+            }
+        ]
+    }
+
+    with patch.object(client, "_send_request", side_effect=[mock_503_resp, mock_200_resp]) as mock_send:
+        res = client.execute("SELECT 1")
+        assert len(res) == 0
+        assert mock_send.call_count == 2
+
+    client.close()
+
+
+def test_turso_client_retry_exhausted_raises_transport_error():
+    """Verify TursoClient raises TransportError when retries are exhausted."""
+    client = TursoClient("https://mock-db.turso.io", max_retries=2, backoff_factor=0.0)
+
+    with patch.object(
+        client,
+        "_send_request",
+        side_effect=httpx.ConnectError("Connection refused")
+    ) as mock_send:
+        with pytest.raises(httpx.ConnectError):
+            client.execute("SELECT 1")
+        assert mock_send.call_count == 2
+
+    client.close()
+
+
+def test_turso_client_keepalive_limits():
+    """Verify TursoClient configures keepalive limits to prevent stale sockets."""
+    client = TursoClient("https://mock-db.turso.io")
+    assert client._limits.keepalive_expiry == 30.0
+    assert client._limits.max_keepalive_connections == 5
     client.close()
 
 
