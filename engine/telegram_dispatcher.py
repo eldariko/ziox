@@ -10,6 +10,7 @@ import html
 import logging
 import urllib.parse
 from typing import List, Optional, Dict, Any
+from datetime import datetime, timezone
 import httpx
 from engine.security import mask_telegram_token
 
@@ -17,6 +18,17 @@ logger = logging.getLogger(__name__)
 
 VALID_STYLES = {"any", "factual", "sharp", "historical_legal", "rhetorical_question"}
 VALID_LANGS = {"en", "ar", "both"}
+
+
+def mask_chat_id_for_display(chat_id: str, username: str = "", tier: str = "free") -> str:
+    """
+    Format chat ID for display so GitHub Actions secret masker does not censor it to '***'.
+    Shows e.g. 'Admin (..5871)' or '@handle (..5871)'.
+    """
+    clean_id = str(chat_id).strip()
+    suffix = clean_id[-4:] if len(clean_id) >= 4 else clean_id
+    label = f"@{username}" if username and username != "operator_admin" else ("Admin" if tier == "admin" else "User")
+    return f"{label} (..{suffix})"
 
 
 def build_x_web_intent_url(tweet_id: str, reply_text: str) -> str:
@@ -144,6 +156,15 @@ class TelegramDispatcher:
             if self.bot_token
             else None
         )
+        self.last_dispatches: List[Dict[str, Any]] = []
+
+    def get_last_dispatches(self) -> List[Dict[str, Any]]:
+        """Return list of dispatches made during the latest cycle."""
+        return list(self.last_dispatches)
+
+    def clear_last_dispatches(self) -> None:
+        """Clear recorded dispatches."""
+        self.last_dispatches.clear()
 
     def setup_bot_commands(self, http_client: Optional[httpx.Client] = None) -> bool:
         """
@@ -1053,6 +1074,18 @@ class TelegramDispatcher:
                         continue
                     resp.raise_for_status()
                     logger.info(f"[TelegramDispatcher] Dispatched review card to chat {clean_cid}")
+                    self.last_dispatches.append({
+                        "tweet_id": tweet_id,
+                        "author_handle": author_handle,
+                        "chat_id": clean_cid,
+                        "username": "operator_admin" if clean_cid in self.chat_ids else "",
+                        "tier": "admin" if clean_cid in self.chat_ids else "free",
+                        "preferred_lang": "en",
+                        "style": "default",
+                        "draft_reply": draft_reply,
+                        "link": None,
+                        "is_fallback": (target_chat_ids is None or clean_cid in self.chat_ids),
+                    })
                 except Exception as e:
                     logger.error(f"[TelegramDispatcher] Failed to send to chat {clean_cid}: {mask_telegram_token(e)}")
                     overall_success = False
@@ -1087,8 +1120,7 @@ class TelegramDispatcher:
           matching the tweet's language (`en` or `ar`), readiness state, daily limit, and deduplication.
         - Matches each subscriber's `preferred_style` when available, otherwise assigns the next unused variation.
         - Includes the `✅ הגבתי ב-X` (`ack:<tweet_id>`) inline confirmation button on every dispatched card.
-        - Never assigns the same `variation_hash` to two different subscribers on the same `tweet_id`.
-        - Records each successful delivery in the `dispatches` table.
+        - Never assigns the same `variation_hash` to two different subscribers on the same `tweet_id`.\n        - Records each successful delivery in the `dispatches` table.
         Returns the number of subscribers who received a unique variation.
         """
         if not self.api_url or not variations:
@@ -1216,5 +1248,18 @@ class TelegramDispatcher:
                     style=chosen_var["style"],
                 )
                 dispatched_count += 1
+                self.last_dispatches.append({
+                    "tweet_id": tweet_id,
+                    "author_handle": author_handle,
+                    "chat_id": chat_id,
+                    "username": sub.get("username", ""),
+                    "tier": sub.get("tier", "free"),
+                    "preferred_lang": sub.get("preferred_lang", "en"),
+                    "style": chosen_var["style"],
+                    "draft_reply": chosen_var["text"],
+                    "link": chosen_var.get("link"),
+                    "variation_hash": chosen_var["hash"],
+                    "is_fallback": False,
+                })
 
         return dispatched_count
