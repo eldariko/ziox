@@ -111,7 +111,7 @@ class Settings(BaseSettings):
         description="Maximum consecutive unconfirmed dispatches before auto-pausing an unresponsive subscriber"
     )
 
-    # Keywords for X search (English and Arabic)
+    # Keywords for X search (English only)
     search_keywords: List[str] = Field(
         default=[
             "Israel",
@@ -119,10 +119,7 @@ class Settings(BaseSettings):
             "IDF",
             "Zionism",
             "Hostages",
-            "Middle East",
-            "إسرائيل",
-            "غزة",
-            "مساعدات غزة"
+            "Middle East"
         ]
     )
 

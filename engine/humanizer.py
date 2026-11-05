@@ -377,7 +377,7 @@ class Humanizer:
             sanitized_variations.append({
                 "style": style,
                 "text": final_text,
-                "link": chosen_link,
+                "link": (chosen_link if (chosen_link and chosen_link in final_text) else None),
             })
 
         return sanitized_variations

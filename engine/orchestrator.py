@@ -217,7 +217,7 @@ class BotOrchestrator:
             diversified_vars = Humanizer.diversify_links_for_variations(
                 variations=raw_variations,
                 tweet_text=tweet.text,
-                validate_links=False,
+                validate_links=True,
                 max_length=280,
                 no_link_variation_ratio=effective_ratio,
             )
@@ -265,6 +265,25 @@ class BotOrchestrator:
                 )
                 next_status = "DISPATCHED_WAVE" if remaining_eligible else "DISPATCHED_TELEGRAM"
                 return True, next_status, sent_count
+
+        # Language-aware fallback: Ensure candidate post language matches recipient before dispatching review
+        tweet_lang = self.detect_tweet_language(tweet.text)
+        admin_chat_ids = getattr(self.telegram, "chat_ids", [])
+        if admin_chat_ids and hasattr(self.repo, "get_subscriber"):
+            # Check if any admin recipient matches the candidate tweet language
+            has_matching_admin = False
+            for cid in admin_chat_ids:
+                sub = self.repo.get_subscriber(cid)
+                admin_pref = (sub.get("preferred_lang") if sub else "en") or "en"
+                if admin_pref in ("both", tweet_lang):
+                    has_matching_admin = True
+                    break
+            if not has_matching_admin:
+                logger.warning(
+                    f"[DISPATCH FALLBACK SUPPRESSED] Tweet {tweet.id} language ('{tweet_lang}') "
+                    f"does not match admin preference. Suppressing fallback dispatch."
+                )
+                return False, "DISPATCH_SUPPRESSED_LANGUAGE_MISMATCH", 0
 
         dispatched = bool(
             self.telegram.dispatch_review(

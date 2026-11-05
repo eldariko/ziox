@@ -228,6 +228,14 @@ class DiscoveryRadar:
                 tweets = provider.search_recent_tweets(query_str, limit=limit_per_keyword)
                 for tweet in tweets:
                     query_stats["raw_count"] += 1
+                    # Early filter: reject non-English candidate tweets
+                    raw_lang = (getattr(tweet, "raw_data", {}) or {}).get("lang", "")
+                    if raw_lang and raw_lang.lower() not in ("en", "und"):
+                        query_stats["skipped_language"] = query_stats.get("skipped_language", 0) + 1
+                        continue
+                    if self._is_arabic_term(tweet.text):
+                        query_stats["skipped_language"] = query_stats.get("skipped_language", 0) + 1
+                        continue
                     if tweet.age_in_minutes > max_age_minutes:
                         query_stats["skipped_age"] += 1
                         continue
