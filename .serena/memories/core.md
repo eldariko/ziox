@@ -11,13 +11,13 @@ AI-powered fact-checking, advocacy, and engagement bot for X (Twitter). Monitors
 
 ## Core Subsystems
 
-- engine/orchestrator.py: Pipeline coordination connecting radar, analysis, verification, humanizer, Telegram dispatcher, and posting.
+- engine/orchestrator.py: Pipeline coordination connecting radar, analysis, verification, humanizer, Telegram dispatcher, and posting. Enforces mandatory live link validation (`validate_links=True`) and language-aware review fallback.
 - engine/telegram_dispatcher.py: Telegram Bot API integration with one-tap X Web Intent buttons, mobile HTML review cards, and webhook management (`set_webhook`, `delete_webhook`).
-- engine/radar.py: Monitors timeline and searches for relevant narratives and claims (filters by `max_tweet_age_hours`).
+- engine/radar.py: Monitors timeline and searches for relevant narratives and claims (filters by `max_tweet_age_hours` and enforces early English-only candidate ingestion).
 - engine/virality.py: Hybrid virality scoring supporting both fresh breaking tweets (`<60m`) and sustained viral posts (`1h-24h` via `age_hours ** 0.65` decay).
-- engine/grounding.py: Fact-checking and grounding engine powered by Gemini.
-- engine/humanizer.py: Style, tone modulation, and anti-bot stealth heuristics.
-- engine/link_validator.py: Validates evidence URLs and citation links.
+- engine/grounding.py: Fact-checking and grounding engine powered by Gemini, strictly generating English evaluations and variation outputs.
+- engine/humanizer.py: Style, tone modulation, anti-bot stealth heuristics, and proof link diversification reflecting verified live URLs.
+- engine/link_validator.py: Validates evidence URLs and citation links against live HTTP endpoints and content thresholds.
 - providers/: Interfaces to social platform backends (twikit_provider.py blends `Top` + `Latest` tabs and deduplicates; mock_provider.py).
 - database/: Storage & state tracking with Turso/libSQL (turso_client.py, repository.py).
 - workers/telegram_webhook/: Zero-cost serverless Cloudflare Worker (`worker.js` + `wrangler.toml`) handling live Telegram commands & inline callbacks directly against Turso HTTP `/v2/pipeline`.
@@ -25,7 +25,7 @@ AI-powered fact-checking, advocacy, and engagement bot for X (Twitter). Monitors
 ## Community SaaS Architecture (multi-subscriber Telegram)
 
 - Scanner = ONE dedicated X account (twikit cookies); subscribers never touch X credentials. They post via X Web Intent buttons from their own accounts. Bot never auto-posts to X when telegram_review_enabled.
-- Flow: demand query (`repository.get_available_subscriber_demand`) -> dynamic radar (`Top` + `Latest` Boolean OR queries per script, `min_faves`, dynamic `limit_per_keyword`, Gaussian jitter, circuit breaker) -> queue -> grounding (batch variations) -> humanizer (link/no-link mix) -> multi-wave sharded dispatch to eligible subscribers until 100% of available subscribers in the run receive at least one post.
+- Flow: demand query (`repository.get_available_subscriber_demand`) -> dynamic radar (`Top` + `Latest` Boolean OR queries, `min_faves`, dynamic `limit_per_keyword`, Gaussian jitter, circuit breaker, English filter) -> queue -> grounding (batch variations in English) -> humanizer (mandatory live link validation / linkless mix) -> multi-wave sharded dispatch to eligible subscribers until 100% of available subscribers in the run receive at least one post.
 - Circuit breaker: 401/403/429/lock -> ScannerCircuitBreakerError -> abort scan, bot_state cooldown (scanner_cooldown_minutes), admin-only alert (TELEGRAM_CHAT_ID / tier=admin).
 - Subscriber lifecycle: /start -> pending (ready_confirmed=0) -> /ready or button -> active; ack:<tweet_id> button confirms reply; max_unconfirmed_dispatches in a row -> auto-pause (active=0); HTTP 403 from Telegram -> deactivate.
 - Eligibility = ONE SQL query (repository.get_eligible_subscribers_for_tweet): active, ready, lang match, daily quota, not already dispatched. Demand = ONE SQL query (`get_available_subscriber_demand`). Never reintroduce N+1 per-subscriber queries.
