@@ -59,6 +59,7 @@ class DiscoveryRadar:
     def __init__(self, repository: Repository):
         self.repo = repository
         self.last_circuit_breaker_error: Optional[ScannerCircuitBreakerError] = None
+        self.last_scan_stats: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def _is_arabic_term(term: str) -> bool:
@@ -191,6 +192,7 @@ class DiscoveryRadar:
         2. Replaces static 1.2s sleep with Gaussian jitter (`min_search_delay_seconds`..`max_search_delay_seconds`).
         3. Immediately aborts the scan cycle if a `ScannerCircuitBreakerError` (401/403/429/Lock) occurs.
         4. Skips tweets older than `max_tweet_age_hours` (default 24h) before scoring.
+        5. Collects funnel metrics in `self.last_scan_stats` for admin observability.
         """
         self.last_circuit_breaker_error = None
         enqueued_items: List[Dict[str, Any]] = []
@@ -202,7 +204,18 @@ class DiscoveryRadar:
             else [f"{k.strip()} min_faves:{min_faves}" if min_faves > 0 else k.strip() for k in keywords if k.strip()]
         )
 
+        query_stats_list: List[Dict[str, Any]] = []
+
         for idx, query_str in enumerate(queries_to_run):
+            query_stats: Dict[str, Any] = {
+                "query": query_str,
+                "raw_count": 0,
+                "skipped_age": 0,
+                "skipped_already_processed": 0,
+                "skipped_low_virality": 0,
+                "enqueued_count": 0,
+            }
+
             if idx > 0:
                 delay = calculate_search_jitter(min_search_delay_seconds, max_search_delay_seconds)
                 if dry_run or delay <= 0:
@@ -214,13 +227,17 @@ class DiscoveryRadar:
             try:
                 tweets = provider.search_recent_tweets(query_str, limit=limit_per_keyword)
                 for tweet in tweets:
+                    query_stats["raw_count"] += 1
                     if tweet.age_in_minutes > max_age_minutes:
+                        query_stats["skipped_age"] += 1
                         continue
                     if self.repo.is_tweet_processed(tweet.id):
+                        query_stats["skipped_already_processed"] += 1
                         continue
 
                     score = calculate_virality_score(tweet)
                     if score < min_virality_score:
+                        query_stats["skipped_low_virality"] += 1
                         continue
 
                     is_new = self.repo.enqueue_tweet(
@@ -232,6 +249,7 @@ class DiscoveryRadar:
                     )
 
                     if is_new:
+                        query_stats["enqueued_count"] += 1
                         tier = get_virality_tier(tweet)
                         enqueued_items.append({
                             "tweet_id": tweet.id,
@@ -241,6 +259,8 @@ class DiscoveryRadar:
                             "tier": tier,
                             "keyword": query_str
                         })
+                    else:
+                        query_stats["skipped_already_processed"] += 1
             except Exception as e:
                 cb_err = classify_scanner_exception(e)
                 if cb_err is not None:
@@ -260,9 +280,22 @@ class DiscoveryRadar:
                             on_circuit_breaker(cb_err)
                         except Exception as hook_err:
                             logger.error(f"Circuit breaker callback failed: {hook_err}")
+                    query_stats_list.append(query_stats)
                     break
 
                 logger.error(f"Radar failed scanning query '{query_str}': {e}", exc_info=True)
+                query_stats_list.append(query_stats)
                 continue
+
+            query_stats_list.append(query_stats)
+
+        self.last_scan_stats = {
+            "queries": query_stats_list,
+            "total_raw": sum(q["raw_count"] for q in query_stats_list),
+            "total_skipped_age": sum(q["skipped_age"] for q in query_stats_list),
+            "total_skipped_already_processed": sum(q["skipped_already_processed"] for q in query_stats_list),
+            "total_skipped_low_virality": sum(q["skipped_low_virality"] for q in query_stats_list),
+            "total_enqueued": len(enqueued_items),
+        }
 
         return enqueued_items

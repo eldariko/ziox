@@ -132,6 +132,11 @@ class LinkValidator:
         return is_ok
 
     @classmethod
+    def get_cache(cls) -> Dict[str, Tuple[bool, int]]:
+        """Return a copy of the URL validation cache."""
+        return dict(cls._cache)
+
+    @classmethod
     def clear_cache(cls) -> None:
         """Clear memory cache of validated URLs."""
         cls._cache.clear()
