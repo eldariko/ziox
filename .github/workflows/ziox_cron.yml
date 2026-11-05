@@ -11,6 +11,11 @@ on:
         required: false
         type: boolean
         default: true
+      no_jitter:
+        description: 'Run immediately without start jitter delay'
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
   group: ziox-pipeline
@@ -57,5 +62,11 @@ jobs:
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.live_mode }}" != "false" ]; then
             EXTRA_FLAGS="--live"
           fi
-          # Run unified pipeline with start jitter (up to 20 minutes random pause)
-          python main.py --pipeline --start-jitter 20 $EXTRA_FLAGS
+
+          JITTER_FLAGS="--start-jitter 20"
+          if [ "${{ inputs.no_jitter }}" = "true" ]; then
+            JITTER_FLAGS="--no-jitter"
+          fi
+
+          # Run unified pipeline with jitter or immediate execution
+          python main.py --pipeline $JITTER_FLAGS $EXTRA_FLAGS
