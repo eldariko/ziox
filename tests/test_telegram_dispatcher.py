@@ -409,6 +409,13 @@ def test_dispatch_variations_to_subscribers_unique_sharding(tmp_path):
     # Subscriber 103 ('any') -> gets remaining variation 3
     assert "Legal rebuttal variation 3" in by_chat["103"]
 
+    # Verify last_dispatches contains exactly 1 entry per subscriber (no duplicate 'default' + style rows)
+    recorded = dispatcher.get_last_dispatches()
+    assert len(recorded) == 3
+    assert [d["chat_id"] for d in recorded] == ["101", "102", "103"]
+    assert [d["style"] for d in recorded] == ["sharp", "factual", "historical_legal"]
+    assert all(d["username"] in ("u1", "u2", "u3") for d in recorded)
+
     # Verify the inline keyboard includes the '✅ הגבתי ב-X' (ack:<tweet_id>) confirmation button!
     kb_101 = sent_payloads[0]["reply_markup"]["inline_keyboard"]
     assert len(kb_101) == 3

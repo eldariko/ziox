@@ -1019,6 +1019,7 @@ class TelegramDispatcher:
         target_chat_ids: Optional[List[str]] = None,
         include_ack_button: bool = False,
         repository: Optional[Any] = None,
+        record_in_last_dispatches: bool = True,
     ) -> bool:
         """
         Dispatches a review card to `target_chat_ids` (or all configured `self.chat_ids`)
@@ -1079,18 +1080,19 @@ class TelegramDispatcher:
                         continue
                     resp.raise_for_status()
                     logger.info(f"[TelegramDispatcher] Dispatched review card to chat {clean_cid}")
-                    self.last_dispatches.append({
-                        "tweet_id": tweet_id,
-                        "author_handle": author_handle,
-                        "chat_id": clean_cid,
-                        "username": "operator_admin" if clean_cid in self.chat_ids else "",
-                        "tier": "admin" if clean_cid in self.chat_ids else "free",
-                        "preferred_lang": "en",
-                        "style": "default",
-                        "draft_reply": draft_reply,
-                        "link": None,
-                        "is_fallback": (target_chat_ids is None or clean_cid in self.chat_ids),
-                    })
+                    if record_in_last_dispatches:
+                        self.last_dispatches.append({
+                            "tweet_id": tweet_id,
+                            "author_handle": author_handle,
+                            "chat_id": clean_cid,
+                            "username": "operator_admin" if clean_cid in self.chat_ids else "",
+                            "tier": "admin" if clean_cid in self.chat_ids else "free",
+                            "preferred_lang": "en",
+                            "style": "default",
+                            "draft_reply": draft_reply,
+                            "link": None,
+                            "is_fallback": (target_chat_ids is None or clean_cid in self.chat_ids),
+                        })
                 except Exception as e:
                     logger.error(f"[TelegramDispatcher] Failed to send to chat {clean_cid}: {mask_telegram_token(e)}")
                     overall_success = False
@@ -1243,6 +1245,7 @@ class TelegramDispatcher:
                 target_chat_ids=[chat_id],
                 include_ack_button=True,
                 repository=repository,
+                record_in_last_dispatches=False,
             )
 
             if sent:
