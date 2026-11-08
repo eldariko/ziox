@@ -390,6 +390,7 @@ def main():
     grounding = GroundingEngine(
         api_key=settings.gemini_api_key,
         model_name=settings.gemini_model,
+        fallback_models=settings.gemini_fallback_models,
         enable_search=settings.gemini_search_grounding
     )
 

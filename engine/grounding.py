@@ -20,6 +20,13 @@ INLINE_URL_REGEX = re.compile(r"https?://\S+", re.IGNORECASE)
 
 STYLE_CYCLE = ["factual", "sharp", "historical_legal", "rhetorical_question"]
 
+DEFAULT_FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-3.5-flash-lite",
+]
+
 SYSTEM_PROMPT = """
 You are a knowledgeable, articulate, and realistic digital commentator defending Israel and countering false narratives on X.
 
@@ -35,6 +42,7 @@ CORE PRINCIPLES:
    - Keep responses strictly between 1 and 2 concise sentences.
    - STRICT LENGTH LIMIT: Tweets on X cannot exceed 280 characters. Accounting for attached proof links (which take 23 characters), EVERY draft reply text MUST NEVER EXCEED 220 CHARACTERS. Be concise, punchy, and direct.
    - STRICT NO-INLINE-URL RULE: NEVER include raw URLs (http:// or https://) inside `draft_reply` or inside any `draft_variations[].text` field! Provide URLs ONLY in `recommended_link` fields so our Humanizer can attach a single verified link cleanly without creating duplicate links.
+   - STRICT LINK SPECIFICITY RULE: NEVER provide bare domain root homepages (e.g., `https://www.timesofisrael.com` or `https://www.bbc.com`) in `recommended_link`! Either provide a deep-linked official document/dashboard URL (such as `https://govextra.gov.il/cogat/humanitarian-efforts/home/` or `https://www.un.org/unispal/document/auto-insert-185393/`) or set `recommended_link` to `null` so our verified proof vault can attach an official source automatically.
    - Do NOT sound like a press release, an essay, or an AI summary.
    - Avoid robotic clichés and conversational filler.
 5. Multi-Variation Generation (Anti-Copy-Paste Community Mode):
@@ -49,7 +57,7 @@ You MUST respond strictly in valid JSON format matching this schema:
   "is_worth_replying": true,
   "claim_identified": "summary of the false or misleading claim",
   "verified_facts": ["fact 1 with source/detail", "fact 2"],
-  "recommended_link": "optional url to official data or null",
+  "recommended_link": "optional deep url to official data or null (NEVER a bare domain homepage)",
   "draft_reply": "1-2 punchy, composed human sentences rebutting the claim in English only (STRICTLY UNDER 220 CHARACTERS, NO INLINE URLS)",
   "draft_variations": [
     {
@@ -102,19 +110,35 @@ def _strip_inline_urls(text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _sanitize_recommended_link(url: Optional[str]) -> Optional[str]:
+    """Strip bare non-whitelisted domain homepages (e.g., https://www.timesofisrael.com) from recommended_link."""
+    if not url or not isinstance(url, str):
+        return None
+    clean = url.strip()
+    if not clean:
+        return None
+    from engine.link_validator import LinkValidator
+    if LinkValidator.is_bare_homepage(clean):
+        logger.info(f"Stripping bare domain homepage '{clean}' from recommended_link.")
+        return None
+    return clean
+
+
 class GroundingEngine:
     """Manages fact verification and grounded response drafting via Gemini."""
 
     def __init__(
         self,
         api_key: str = "",
-        model_name: str = "gemini-3.5-flash-lite",
+        model_name: str = "gemini-2.5-flash",
+        fallback_models: Optional[List[str]] = None,
         enable_search: bool = False,
         variations_per_tweet: int = 4,
         max_variations_per_call: int = 10,
     ):
         self.api_key = api_key
         self.model_name = model_name
+        self.fallback_models = self._build_model_chain(model_name, fallback_models)
         self.enable_search = enable_search
         self.search_available = enable_search
         self.variations_per_tweet = max(1, variations_per_tweet)
@@ -128,23 +152,37 @@ class GroundingEngine:
             except ImportError:
                 logger.warning("google-genai package not installed. Grounding will use simulated mode.")
 
+    @staticmethod
+    def _build_model_chain(primary: str, fallbacks: Optional[List[str]] = None) -> List[str]:
+        """Build an ordered, deduplicated list of models starting with `primary`."""
+        chain: List[str] = []
+        candidates = [primary] + (list(fallbacks) if fallbacks is not None else list(DEFAULT_FALLBACK_MODELS))
+        for m in candidates:
+            clean_m = (m or "").strip()
+            if clean_m and clean_m not in chain:
+                chain.append(clean_m)
+        return chain or ["gemini-2.5-flash"]
+
     def _normalize_result(self, result: FactCheckResult, max_count: Optional[int] = None) -> FactCheckResult:
         """
         Ensure backward compatibility between `draft_reply` and `draft_variations`,
-        and strip any accidental inline URLs from narrative text fields.
+        strip any accidental inline URLs from narrative text fields, and filter out
+        bare non-whitelisted domain homepages from `recommended_link`.
         """
         limit = max_count if max_count is not None else self.variations_per_tweet
         result.draft_reply = _strip_inline_urls(result.draft_reply)
+        result.recommended_link = _sanitize_recommended_link(result.recommended_link)
 
         cleaned_variations: List[DraftVariation] = []
         for var in result.draft_variations:
             cleaned_text = _strip_inline_urls(var.text)
+            sanitized_var_link = _sanitize_recommended_link(var.recommended_link) or result.recommended_link
             if cleaned_text:
                 cleaned_variations.append(
                     DraftVariation(
                         style=var.style or "factual",
                         text=cleaned_text,
-                        recommended_link=var.recommended_link or result.recommended_link,
+                        recommended_link=sanitized_var_link,
                     )
                 )
 
@@ -191,7 +229,7 @@ class GroundingEngine:
                 f"{sample_excluded}\nUse fresh angles, different openings, and distinct vocabulary."
             )
 
-        # Production Gemini Call with optional Google Search Grounding and Retry Logic
+        # Production Gemini Call with optional Google Search Grounding, Schema Enforcement, and Multi-Model Fallback
         prompt = (
             f"Tweet by @{author_handle}:\n\"{tweet_text}\"\n\n"
             f"Evaluate the tweet, verify facts if necessary, and provide structured JSON with up to "
@@ -200,24 +238,30 @@ class GroundingEngine:
             f"{exclusion_clause}"
         )
 
-        config_params = {
+        config_params: Dict[str, Any] = {
             "system_instruction": SYSTEM_PROMPT,
-            "response_mime_type": "application/json"
+            "response_mime_type": "application/json",
+            "response_schema": FactCheckResult,
         }
         if self.search_available and types is not None:
             try:
                 config_params["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+                # Google GenAI SDK may disallow combining GoogleSearch tool with response_schema on some endpoints
+                config_params.pop("response_schema", None)
             except Exception as tool_err:
                 logger.warning(f"Google Search tool configuration fallback: {tool_err}")
 
-        max_retries = 3
+        max_retries = max(3, len(self.fallback_models))
         backoff_seconds = 2.0
 
         for attempt in range(max_retries):
+            active_model = self.fallback_models[attempt % len(self.fallback_models)]
             try:
-                config = types.GenerateContentConfig(**config_params) if types is not None else config_params
+                config: Optional[types.GenerateContentConfig] = (
+                    types.GenerateContentConfig(**config_params) if types is not None else None
+                )
                 response = self.client.models.generate_content(
-                    model=self.model_name,
+                    model=active_model,
                     contents=prompt,
                     config=config
                 )
@@ -235,8 +279,10 @@ class GroundingEngine:
                         for chunk in chunks:
                             web_data = getattr(chunk, "web", None)
                             if web_data and getattr(web_data, "uri", None):
-                                result.recommended_link = web_data.uri
-                                break
+                                candidate_uri = _sanitize_recommended_link(web_data.uri)
+                                if candidate_uri:
+                                    result.recommended_link = candidate_uri
+                                    break
 
                 result = self._normalize_result(result, max_count=target_variations)
                 return result
@@ -244,26 +290,33 @@ class GroundingEngine:
             except Exception as e:
                 err_str = str(e)
 
-                # If Google Search Grounding quota is exhausted (429 RESOURCE_EXHAUSTED), disable search immediately
+                # If Google Search Grounding quota is exhausted (429 RESOURCE_EXHAUSTED), disable search for session
                 if "tools" in config_params and ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str):
-                    logger.warning("Google Search Grounding quota exceeded (free tier). Disabling search tool and continuing with standard Gemini generation.")
+                    logger.warning("Google Search Grounding quota exceeded. Disabling search tool and continuing with standard Gemini generation.")
                     config_params.pop("tools", None)
+                    config_params["response_schema"] = FactCheckResult
                     self.search_available = False
                     continue
 
-                if "503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str:
-                    logger.warning(f"Google API busy (attempt {attempt + 1}/{max_retries}): {err_str}. Retrying in {backoff_seconds}s...")
+                if "503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str or "NOT_FOUND" in err_str:
+                    next_model = self.fallback_models[(attempt + 1) % len(self.fallback_models)]
+                    logger.warning(
+                        f"Google API busy on model '{active_model}' (attempt {attempt + 1}/{max_retries}): {err_str}. "
+                        f"Retrying in {backoff_seconds}s with model '{next_model}'..."
+                    )
                     time.sleep(backoff_seconds)
                     backoff_seconds *= 2.0
+                    # On transient 503 with search tools enabled, drop search tool ONLY for the remaining retries of this call
+                    # without permanently disabling self.search_available for future tweets
                     if "tools" in config_params:
                         config_params.pop("tools", None)
-                        self.search_available = False
+                        config_params["response_schema"] = FactCheckResult
                     continue
                 else:
-                    logger.error(f"Error calling Gemini Grounding Engine: {e}")
+                    logger.error(f"Error calling Gemini Grounding Engine ({active_model}): {e}")
                     break
 
-        # If Google API is temporarily overwhelmed, use internal verified knowledge vault
+        # If Google API is temporarily overwhelmed across all fallback models, use internal verified knowledge vault
         logger.warning("Google API rate limit reached after retries. Using internal verified fact vault.")
         return self._fallback_evaluate(
             tweet_text,
