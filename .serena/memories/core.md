@@ -15,7 +15,7 @@ AI-powered fact-checking, advocacy, and engagement bot for X (Twitter). Monitors
 - engine/telegram_dispatcher.py: Telegram Bot API integration with one-tap X Web Intent buttons, mobile HTML review cards, and webhook management (`set_webhook`, `delete_webhook`).
 - engine/radar.py: Monitors timeline and searches for relevant narratives and claims (filters by `max_tweet_age_hours` and enforces early English-only candidate ingestion).
 - engine/virality.py: Hybrid virality scoring supporting both fresh breaking tweets (`<60m`) and sustained viral posts (`1h-24h` via `age_hours ** 0.65` decay).
-- engine/grounding.py: Fact-checking and grounding engine powered by Gemini (`gemini-2.5-flash` primary with multi-model fallback chain on 503/429 and Pydantic `response_schema=FactCheckResult`), strictly generating English evaluations and variation outputs and stripping bare non-whitelisted homepage links.
+- engine/grounding.py: Fact-checking and grounding engine powered by Gemini (`gemini-3.8-flash` primary with multi-model fallback chain on 503/429/404 and Pydantic `response_schema=FactCheckResult`), strictly generating English evaluations and variation outputs and stripping bare non-whitelisted homepage links.
 - engine/humanizer.py: Style, tone modulation, anti-bot stealth heuristics, and proof link diversification reflecting verified live URLs and rejecting bare domain homepages.
 - engine/link_validator.py: Validates evidence URLs and citation links against live HTTP endpoints, content thresholds, and bare homepage rejection (`is_bare_homepage`).
 - providers/: Interfaces to social platform backends (twikit_provider.py blends `Top` + `Latest` tabs and deduplicates; mock_provider.py).
