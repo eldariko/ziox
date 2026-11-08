@@ -1,10 +1,12 @@
 """Link Validation and Verification Engine for zioX."""
 
+import json
 import re
 import logging
 import urllib.request
 import urllib.error
-from typing import Dict, Optional, Tuple
+from pathlib import Path
+from typing import Dict, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -13,10 +15,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_SECONDS = 4.0
 
 # Browser-like User-Agent to avoid spurious blocks from CDNs
-DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 # Minimum word count required in body to be considered a real article/document
 MIN_ARTICLE_WORDS = 60
+
+WHITELIST_PATH = Path(__file__).resolve().parent.parent / "assets" / "proofs" / "whitelisted_sources.json"
 
 
 class LinkValidator:
@@ -24,6 +28,29 @@ class LinkValidator:
 
     # In-memory validation cache: {url: (is_valid, status_code)}
     _cache: Dict[str, Tuple[bool, int]] = {}
+    _whitelisted_urls_cache: Optional[Set[str]] = None
+
+    @classmethod
+    def _get_whitelisted_urls(cls) -> Set[str]:
+        """Load and cache all normalized URLs explicitly listed in whitelisted_sources.json."""
+        if cls._whitelisted_urls_cache is not None:
+            return cls._whitelisted_urls_cache
+        urls: Set[str] = set()
+        if WHITELIST_PATH.exists():
+            try:
+                with open(WHITELIST_PATH, "r", encoding="utf-8") as f:
+                    vault = json.load(f)
+                for data in vault.values():
+                    for src_url in (data.get("sources") or {}).values():
+                        if src_url:
+                            urls.add(src_url.strip().rstrip("/").lower())
+                    for alt_url in (data.get("alternate_sources") or []):
+                        if alt_url:
+                            urls.add(alt_url.strip().rstrip("/").lower())
+            except Exception:
+                pass
+        cls._whitelisted_urls_cache = urls
+        return urls
 
     @classmethod
     def is_valid_url_syntax(cls, url: str) -> bool:
@@ -33,6 +60,30 @@ class LinkValidator:
         try:
             parsed = urlparse(url.strip())
             return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+        except Exception:
+            return False
+
+    @classmethod
+    def is_bare_homepage(cls, url: Optional[str]) -> bool:
+        """
+        Return True if the URL is a bare domain root/homepage (e.g. 'https://www.timesofisrael.com'
+        or 'https://bbc.com/') that is NOT explicitly authorized in whitelisted_sources.json.
+        Bare news homepages do not point to a specific factual proof and often trigger WAF 403s.
+        """
+        if not url or not isinstance(url, str):
+            return False
+        clean_url = url.strip()
+        if not cls.is_valid_url_syntax(clean_url):
+            return False
+        normalized = clean_url.rstrip("/").lower()
+        if normalized in cls._get_whitelisted_urls():
+            return False
+        try:
+            parsed = urlparse(clean_url)
+            path = (parsed.path or "").strip()
+            has_deep_path = bool(path and path != "/")
+            has_query = bool(parsed.query)
+            return not has_deep_path and not has_query
         except Exception:
             return False
 
@@ -56,12 +107,20 @@ class LinkValidator:
 
         clean_url = url.strip()
 
+        if cls.is_bare_homepage(clean_url):
+            logger.warning(f"URL {clean_url} rejected: bare domain homepage without specific article path.")
+            if use_cache:
+                cls._cache[clean_url] = (False, 0)
+            return False, 0
+
         if use_cache and clean_url in cls._cache:
             return cls._cache[clean_url]
 
         headers = {
             "User-Agent": DEFAULT_USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
         }
 
         # Perform GET request to inspect headers and body content

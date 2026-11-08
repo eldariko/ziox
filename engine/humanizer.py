@@ -217,7 +217,7 @@ class Humanizer:
     ) -> Optional[str]:
         """
         Verify that a proposed or whitelisted link is alive (HTTP 200..399).
-        If proposed link is dead/inaccessible, falls back to a verified whitelisted link.
+        If proposed link is a bare homepage or dead/inaccessible, falls back to a verified whitelisted link.
         If no verified link is live, returns None.
         """
         from engine.link_validator import LinkValidator
@@ -228,9 +228,12 @@ class Humanizer:
         # 1. Check proposed link first if given
         if proposed_link and proposed_link.strip():
             candidate = proposed_link.strip()
-            if not validate_http or LinkValidator.is_alive(candidate):
+            if LinkValidator.is_bare_homepage(candidate):
+                logger.warning(f"Proposed link '{candidate}' is a bare domain homepage. Attempting whitelist fallback.")
+            elif not validate_http or LinkValidator.is_alive(candidate):
                 return candidate
-            logger.warning(f"Proposed link '{candidate}' failed health check. Attempting whitelist fallback.")
+            else:
+                logger.warning(f"Proposed link '{candidate}' failed health check. Attempting whitelist fallback.")
 
         # 2. Whitelist fallback based on text keywords
         if auto_attach_whitelist:
@@ -300,6 +303,8 @@ class Humanizer:
         Returns a list of dicts:
           [{"style": str, "text": str, "link": Optional[str]}, ...]
         """
+        from engine.link_validator import LinkValidator
+
         is_arabic = any("\u0600" <= c <= "\u06ff" for c in tweet_text)
         lang = "ar" if is_arabic else "en"
         link_pool = cls.match_whitelisted_links_pool(tweet_text, lang=lang)
@@ -310,6 +315,8 @@ class Humanizer:
             style = getattr(var, "style", None) or (var.get("style") if isinstance(var, dict) else "factual") or "factual"
             raw_text = getattr(var, "text", None) if not isinstance(var, dict) else var.get("text", "")
             var_link = getattr(var, "recommended_link", None) if not isinstance(var, dict) else var.get("recommended_link")
+            if var_link and LinkValidator.is_bare_homepage(var_link):
+                var_link = None
             clean_narrative = cls.strip_inline_urls(raw_text or "")
             if clean_narrative:
                 valid_items.append((style, clean_narrative, var_link))
