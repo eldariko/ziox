@@ -21,10 +21,10 @@ INLINE_URL_REGEX = re.compile(r"https?://\S+", re.IGNORECASE)
 STYLE_CYCLE = ["factual", "sharp", "historical_legal", "rhetorical_question"]
 
 DEFAULT_FALLBACK_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
+    "gemini-flash-latest",
 ]
 
 SYSTEM_PROMPT = """
@@ -130,7 +130,7 @@ class GroundingEngine:
     def __init__(
         self,
         api_key: str = "",
-        model_name: str = "gemini-2.5-flash",
+        model_name: str = "gemini-3.8-flash",
         fallback_models: Optional[List[str]] = None,
         enable_search: bool = False,
         variations_per_tweet: int = 4,
@@ -161,7 +161,7 @@ class GroundingEngine:
             clean_m = (m or "").strip()
             if clean_m and clean_m not in chain:
                 chain.append(clean_m)
-        return chain or ["gemini-2.5-flash"]
+        return chain or ["gemini-3.8-flash"]
 
     def _normalize_result(self, result: FactCheckResult, max_count: Optional[int] = None) -> FactCheckResult:
         """
@@ -300,12 +300,16 @@ class GroundingEngine:
 
                 if "503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str or "NOT_FOUND" in err_str:
                     next_model = self.fallback_models[(attempt + 1) % len(self.fallback_models)]
+                    # If model is deprecated/not found, immediately switch to next model without sleeping
+                    is_not_found = "404" in err_str or "NOT_FOUND" in err_str
+                    sleep_time = 0.1 if is_not_found else backoff_seconds
                     logger.warning(
-                        f"Google API busy on model '{active_model}' (attempt {attempt + 1}/{max_retries}): {err_str}. "
-                        f"Retrying in {backoff_seconds}s with model '{next_model}'..."
+                        f"Google API unavailable on model '{active_model}' (attempt {attempt + 1}/{max_retries}): {err_str}. "
+                        f"Retrying in {sleep_time}s with model '{next_model}'..."
                     )
-                    time.sleep(backoff_seconds)
-                    backoff_seconds *= 2.0
+                    time.sleep(sleep_time)
+                    if not is_not_found:
+                        backoff_seconds *= 2.0
                     # On transient 503 with search tools enabled, drop search tool ONLY for the remaining retries of this call
                     # without permanently disabling self.search_available for future tweets
                     if "tools" in config_params:

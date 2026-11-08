@@ -6,7 +6,7 @@ Integrate Google Gemini API with web search grounding to evaluate tweet claims, 
 ## Requirements
 
 ### Requirement: Free-Tier Gemini Connectivity
-The system MUST connect to the Google Gemini API using configured API keys and evaluate tweets using the designated model (`gemini-2.5-flash` or compatible).
+The system MUST connect to the Google Gemini API using configured API keys and evaluate tweets using the designated model (`gemini-3.8-flash` or compatible).
 
 #### Scenario: Successful claim evaluation
 - **WHEN** the grounding engine evaluates a tweet claim with valid API credentials
@@ -49,7 +49,7 @@ The grounding engine MUST support generating large sets of unique reply variatio
 - **THEN** the grounding engine executes sequential batch calls, passing previously generated variation texts as excluded phrasings so every returned variation has a unique hash and distinct angle.
 
 ### Requirement: Multi-Model Fallback Chain on API Overload
-The grounding engine MUST support a configurable sequence of fallback Gemini models (`fallback_models`) and automatically rotate to the next available model when a `503 UNAVAILABLE` or `429` error occurs during `evaluate_and_draft`.
+The grounding engine MUST support a configurable sequence of fallback Gemini models (`fallback_models`) and automatically rotate to the next available model when a `503 UNAVAILABLE`, `429`, or `404 NOT_FOUND` error occurs during `evaluate_and_draft`.
 
 #### Scenario: Primary model experiences 503 high demand spike
 - **WHEN** the primary configured `model_name` returns `503 UNAVAILABLE` on attempt 1

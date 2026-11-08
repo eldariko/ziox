@@ -14,15 +14,15 @@ class Settings(BaseSettings):
 
     # API Keys & Models
     gemini_api_key: str = Field(default="", description="Google Gemini API Key")
-    gemini_model: str = Field(default="gemini-2.5-flash", description="Primary Gemini Model Name")
+    gemini_model: str = Field(default="gemini-3.8-flash", description="Primary Gemini Model Name")
     gemini_fallback_models: List[str] = Field(
         default=[
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash",
+            "gemini-3.8-flash",
+            "gemini-3.5-flash",
             "gemini-3.5-flash-lite",
+            "gemini-flash-latest",
         ],
-        description="Ordered fallback Gemini models tried automatically on 503/429 errors"
+        description="Ordered fallback Gemini models tried automatically on 503/429/404 errors"
     )
     gemini_search_grounding: bool = Field(default=False, description="Enable Google Search Grounding (requires billing/quota)")
     zernio_api_key: str = Field(default="", description="Zernio API Key")

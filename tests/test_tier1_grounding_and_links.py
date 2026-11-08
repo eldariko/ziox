@@ -29,12 +29,12 @@ def _make_gemini_response(payload: dict):
     )
 
 
-def test_multi_model_fallback_rotates_on_503():
-    """When primary model returns 503 UNAVAILABLE, GroundingEngine rotates to the next fallback model."""
+def test_multi_model_fallback_rotates_on_503_or_404():
+    """When primary model returns 404 NOT_FOUND or 503 UNAVAILABLE, GroundingEngine rotates to the next fallback model."""
     engine = GroundingEngine(
         api_key="",
-        model_name="gemini-3.5-flash-lite",
-        fallback_models=["gemini-2.5-flash", "gemini-2.0-flash"],
+        model_name="gemini-3.8-flash",
+        fallback_models=["gemini-3.5-flash", "gemini-3.5-flash-lite"],
         enable_search=False,
     )
     valid_payload = {
@@ -53,7 +53,7 @@ def test_multi_model_fallback_rotates_on_503():
     }
     mock_models = _MockModelsAPI(
         [
-            RuntimeError("503 UNAVAILABLE: This model is currently experiencing high demand."),
+            RuntimeError("404 NOT_FOUND: This model is no longer available. Please update your code to use gemini-3.8-flash"),
             _make_gemini_response(valid_payload),
         ]
     )
@@ -68,16 +68,16 @@ def test_multi_model_fallback_rotates_on_503():
 
     assert result.is_worth_replying is True
     assert len(mock_models.calls) == 2
-    assert mock_models.calls[0]["model"] == "gemini-3.5-flash-lite"
-    assert mock_models.calls[1]["model"] == "gemini-2.5-flash"
+    assert mock_models.calls[0]["model"] == "gemini-3.8-flash"
+    assert mock_models.calls[1]["model"] == "gemini-3.5-flash"
 
 
 def test_search_available_preserved_on_transient_503_but_disabled_on_429():
     """Transient 503 should NOT permanently disable self.search_available, whereas 429 RESOURCE_EXHAUSTED does."""
     engine = GroundingEngine(
         api_key="",
-        model_name="gemini-2.5-flash",
-        fallback_models=["gemini-2.5-flash-lite"],
+        model_name="gemini-3.8-flash",
+        fallback_models=["gemini-3.5-flash-lite"],
         enable_search=True,
     )
     valid_payload = {
