@@ -92,8 +92,10 @@ def test_telegram_dispatcher_format_review_card():
     assert "&lt;script&gt;" in card
     assert "<script>" not in card
     assert "&amp;" in card
-    assert "Score: 12.5" in card
-    assert "[Critical | Score: 12.5]" in card
+    assert "━━━━━━━━━━━━━━━━━━" in card
+    assert "<blockquote>\"Fake quote: &quot;A &amp; B &lt; C &gt; D&quot;\"</blockquote>" in card
+    assert "• Fact 1 &amp; reliable" in card
+    assert "• Fact 2 &lt;verified&gt;" in card
     assert "📌 <b>Facts Cited:</b>" in card
     assert "<code>Verified: 1 &lt; 2 &amp; safe.</code>" in card
 

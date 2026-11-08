@@ -985,19 +985,24 @@ class TelegramDispatcher:
         safe_draft = html.escape(draft_reply)
 
         card = (
-            f"🎯 <b>zioX Review Alert</b> [{virality_tier} | Score: {virality_score:.1f}]\n\n"
-            f"👤 <b>Target:</b> @{safe_author}\n"
-            f"💬 <b>Tweet:</b> <i>\"{safe_snippet}\"</i>\n"
+            "🎯 <b>zioX Review Alert</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>Target:</b> @{safe_author}\n\n"
+            f"💬 <b>Tweet:</b>\n<blockquote>\"{safe_snippet}\"</blockquote>\n"
         )
 
         if claim_flagged:
-            card += f"⚠️ <b>Claim Flagged:</b> {html.escape(claim_flagged)}\n"
+            card += f"⚠️ <b>Claim Flagged:</b> {html.escape(claim_flagged)}\n\n"
 
         if verified_facts:
-            facts_str = " | ".join(html.escape(f) for f in verified_facts)
-            card += f"📌 <b>Facts Cited:</b> {facts_str}\n"
+            facts_lines = "\n".join(f"• {html.escape(f)}" for f in verified_facts)
+            card += f"📌 <b>Facts Cited:</b>\n{facts_lines}\n\n"
 
-        card += f"\n💡 <b>Proposed Reply:</b>\n<code>{safe_draft}</code>"
+        card += (
+            "━━━━━━━━━━━━━━━━━━\n"
+            "💡 <b>Proposed Reply:</b> (tap to copy)\n"
+            f"<code>{safe_draft}</code>"
+        )
         return card
 
     def dispatch_review(
