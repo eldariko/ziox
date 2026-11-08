@@ -11,8 +11,8 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-# Default timeout for checking URL availability
-DEFAULT_TIMEOUT_SECONDS = 4.0
+# Default timeout for checking URL availability (8.0s accounts for slow diplomatic archives like un.org)
+DEFAULT_TIMEOUT_SECONDS = 8.0
 
 # Browser-like User-Agent to avoid spurious blocks from CDNs
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
